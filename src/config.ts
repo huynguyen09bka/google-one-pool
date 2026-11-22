@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -5,6 +6,26 @@ import type { DaemonSettings, Locale, PlanTier, RotationPolicy } from './types.t
 
 export const DEFAULT_PORT = 47891;
 export const DEFAULT_HOST = '127.0.0.1';
+
+const ALLOWED_CHROME_BIN_NAMES = new Set([
+  'google chrome',
+  'google chrome canary',
+  'google chrome beta',
+  'google chrome dev',
+  'brave browser',
+  'brave browser beta',
+  'brave browser nightly',
+  'chromium',
+  'microsoft edge',
+  'vivaldi',
+  'chrome',
+  'google-chrome',
+  'google-chrome-stable',
+  'brave-browser',
+  'chromium-browser',
+  'msedge',
+  'ungoogled-chromium',
+]);
 
 export const VALID_PLAN_TIERS: readonly PlanTier[] = [
   'Google AI Pro',
@@ -30,6 +51,7 @@ export interface PoolPaths {
   agyLockPath: string;
   pidPath: string;
   logPath: string;
+  tokenPath: string;
 }
 
 /**
@@ -47,7 +69,65 @@ export function resolvePaths(homeOverride?: string): PoolPaths {
     agyLockPath: path.join(homeDir, 'agy.lock'),
     pidPath: path.join(homeDir, 'daemon.pid'),
     logPath: path.join(homeDir, 'daemon.log'),
+    tokenPath: path.join(homeDir, 'daemon.token'),
   };
+}
+
+/**
+ * Writes a file and explicitly enforces owner-only permissions (0o600), including pre-existing files.
+ */
+export function writeFileRestricted(filePath: string, data: string | Buffer): void {
+  if (typeof data === 'string') {
+    fs.writeFileSync(filePath, data, { encoding: 'utf8', mode: 0o600 });
+  } else {
+    fs.writeFileSync(filePath, data, { mode: 0o600 });
+  }
+  try {
+    fs.chmodSync(filePath, 0o600);
+  } catch {
+    // Best-effort on platforms without POSIX chmod.
+  }
+}
+
+/**
+ * Reads the persisted daemon bearer token from `daemon.token`, returning null if missing or malformed.
+ */
+export function readDaemonToken(paths: PoolPaths): string | null {
+  try {
+    const raw = fs.readFileSync(paths.tokenPath, 'utf8').trim();
+    return /^[0-9a-f]{64}$/i.test(raw) ? raw : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Loads or generates the 256-bit local daemon API authentication token stored with mode 0o600.
+ */
+export function ensureDaemonToken(paths: PoolPaths): string {
+  ensureDirectories(paths);
+  const existing = readDaemonToken(paths);
+  if (existing) {
+    try {
+      fs.chmodSync(paths.tokenPath, 0o600);
+    } catch {
+      // Best-effort.
+    }
+    return existing;
+  }
+  const token = crypto.randomBytes(32).toString('hex');
+  writeFileRestricted(paths.tokenPath, token + '\n');
+  return token;
+}
+
+/**
+ * Constant-time string comparison for bearer tokens and session cookies.
+ */
+export function tokensEqual(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
 }
 
 /**
@@ -242,4 +322,97 @@ export function resolvePort(portOverride?: number): number {
     return DEFAULT_PORT;
   }
   return raw;
+}
+
+/**
+ * Validates that `chrome_binary` points to an absolute path of a recognized Chromium-based browser
+ * within standard application/binary directories (preventing arbitrary executable invocation).
+ */
+export function validateChromeBinary(raw: string): string {
+  const clean = raw.trim();
+  if (!clean || /[\x00-\x1f\x7f]/.test(clean)) {
+    throw new Error('Đường dẫn trình duyệt Chrome không hợp lệ.');
+  }
+  if (!path.isAbsolute(clean)) {
+    throw new Error(`Đường dẫn trình duyệt phải là đường dẫn tuyệt đối ("${clean}").`);
+  }
+  const normalized = path.resolve(clean);
+  if (normalized !== clean && normalized !== clean.replace(/\/+$/, '')) {
+    throw new Error(`Đường dẫn trình duyệt không được chứa thành phần tương đối ("${clean}").`);
+  }
+  const base = path.basename(normalized).toLowerCase();
+  if (!ALLOWED_CHROME_BIN_NAMES.has(base)) {
+    throw new Error(
+      `Trình duyệt không nằm trong danh sách Chromium được phép ("${path.basename(normalized)}"). Chỉ chấp nhận Google Chrome, Brave Browser, Chromium, Edge hoặc Vivaldi.`,
+    );
+  }
+  const allowedRoots = [
+    '/Applications/',
+    path.join(os.homedir(), 'Applications') + path.sep,
+    '/opt/homebrew/',
+    '/usr/local/',
+    '/usr/bin/',
+    '/snap/bin/',
+    '/opt/',
+  ];
+  if (!allowedRoots.some((prefix) => normalized.startsWith(prefix))) {
+    throw new Error(
+      `Đường dẫn trình duyệt phải nằm trong thư mục ứng dụng hệ thống (/Applications, ~/Applications, /opt, /usr/local, /usr/bin): "${normalized}".`,
+    );
+  }
+  return normalized;
+}
+
+/**
+ * Validates a Chrome profile folder name (e.g. "Default", "Profile 1") preventing path traversal.
+ */
+export function validateChromeProfileName(raw: string): string {
+  const clean = raw.trim();
+  if (
+    !clean ||
+    /[\x00-\x1f\x7f]/.test(clean) ||
+    clean.includes('/') ||
+    clean.includes('\\') ||
+    clean === '.' ||
+    clean === '..'
+  ) {
+    throw new Error(`Tên Chrome profile không hợp lệ ("${raw}"). Ví dụ: "Default" hoặc "Profile 1".`);
+  }
+  return clean;
+}
+
+/**
+ * Validates an optional GCP ADC credentials file path (absolute .json path without control characters).
+ */
+export function validateAdcCredentialsPath(raw: string | null | undefined): string | null {
+  if (raw == null) return null;
+  const clean = raw.trim();
+  if (!clean) return null;
+  if (/[\x00-\x1f\x7f]/.test(clean) || !path.isAbsolute(clean)) {
+    throw new Error(`Đường dẫn file ADC không hợp lệ ("${clean}") — phải là đường dẫn tuyệt đối.`);
+  }
+  const normalized = path.resolve(clean);
+  if (!normalized.toLowerCase().endsWith('.json')) {
+    throw new Error(`File ADC phải có phần mở rộng .json ("${clean}").`);
+  }
+  return normalized;
+}
+
+/**
+ * Redacts embedded username/password credentials from a proxy URL before UI/CLI display or metadata export.
+ */
+export function redactProxyUrl(proxyUrl: string | null | undefined): string | null {
+  if (proxyUrl == null) return null;
+  const clean = proxyUrl.trim();
+  if (!clean) return null;
+  try {
+    const parsed = new URL(clean);
+    if (parsed.username || parsed.password) {
+      const hostPort = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+      return `${parsed.protocol}//***@${hostPort}`;
+    }
+    return clean;
+  } catch {
+    return clean.replace(/\/\/[^/@]+@/, '//***@');
+  }
 }

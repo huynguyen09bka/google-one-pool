@@ -3,6 +3,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
+import { validateChromeBinary } from './config.ts';
 import type { AccountRecord, ProfileMode, SessionStatus } from './types.ts';
 
 export interface DevToolsPageTarget {
@@ -324,9 +325,10 @@ export function hasAccountCookies(account: AccountRecord): boolean {
  */
 export async function openProfileWindow(options: OpenProfileWindowOptions): Promise<{ pid: number | undefined }> {
   const isLinked = options.profileMode === 'linked';
-  const targetBinary = isLinked
+  const rawBinary = isLinked
     ? resolveBrowserBinaryForUserDataDir(options.chromeUserDataDir, options.chromeBinary)
     : options.chromeBinary;
+  const targetBinary = validateChromeBinary(rawBinary);
 
   if (!fs.existsSync(targetBinary)) {
     throw new Error(`Không tìm thấy Chrome tại "${targetBinary}". Hãy kiểm tra lại đường dẫn trong Cài đặt.`);
@@ -377,10 +379,19 @@ export async function openProfileWindow(options: OpenProfileWindowOptions): Prom
  * Probes and gently refreshes Google & Gemini cookies in an isolated headless Chrome window.
  */
 export async function probeAndRefreshProfile(options: ProbeProfileOptions): Promise<ProbeProfileResult> {
-  if (!fs.existsSync(options.chromeBinary)) {
+  let safeBinary: string;
+  try {
+    safeBinary = validateChromeBinary(options.chromeBinary);
+  } catch (err) {
     return {
       status: 'error',
-      detail: `Không tìm thấy Chrome tại "${options.chromeBinary}"`,
+      detail: err instanceof Error ? err.message : String(err),
+    };
+  }
+  if (!fs.existsSync(safeBinary)) {
+    return {
+      status: 'error',
+      detail: `Không tìm thấy Chrome tại "${safeBinary}"`,
     };
   }
 
@@ -439,7 +450,7 @@ export async function probeAndRefreshProfile(options: ProbeProfileOptions): Prom
     proxyUrl: options.proxyUrl,
   });
 
-  const child = spawn(options.chromeBinary, args, {
+  const child = spawn(safeBinary, args, {
     stdio: 'ignore',
   });
 

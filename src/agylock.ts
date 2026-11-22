@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import { ensureDirectories, type PoolPaths } from './config.ts';
+import { ensureDirectories, writeFileRestricted, type PoolPaths } from './config.ts';
 import type { AgyLeaseInfo } from './types.ts';
 
 export const DEFAULT_LEASE_TTL_MS = 10 * 60_000; // 10 phút
@@ -130,7 +130,7 @@ export async function acquireAgyLease(
           };
           const current = readAgyLease(paths, { isPidAlive: isAlive });
           if (current && current.pid === pid && current.acquired_at === payload.acquired_at) {
-            fs.writeFileSync(paths.agyLockPath, JSON.stringify(updated, null, 2), { encoding: 'utf8', mode: 0o600 });
+            writeFileRestricted(paths.agyLockPath, JSON.stringify(updated, null, 2));
           }
           return { ...updated, stale: false };
         },

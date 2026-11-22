@@ -506,14 +506,14 @@
           <div class="backup-box">
             <div style="flex: 1 1 240px;">
               <strong data-i18n="backup_enc_title">Backup mã hóa AES-256-GCM (chuyển máy kèm phiên agy)</strong>
-              <p class="muted-small" data-i18n="backup_enc_sub">Dùng mật khẩu riêng (≥ 6 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.</p>
+              <p class="muted-small" data-i18n="backup_enc_sub">Dùng mật khẩu riêng (≥ 12 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.</p>
             </div>
             <div class="encrypted-backup-controls">
               <input
                 type="password"
                 id="backup-passphrase"
                 data-i18n-placeholder="backup_pass_placeholder"
-                placeholder="Mật khẩu mã hóa / giải mã (≥ 6 ký tự)"
+                placeholder="Mật khẩu mã hóa / giải mã (≥ 12 ký tự)"
                 autocomplete="new-password"
               />
               <div class="backup-actions">
@@ -604,6 +604,32 @@
             <button type="button" class="btn btn-primary" data-close-modal="analytics-modal" data-i18n="btn_close">Đóng</button>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- Modal Xác thực Daemon Token -->
+    <div class="modal-backdrop" id="auth-modal" hidden>
+      <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="auth-modal-title">
+        <div class="modal-header">
+          <h3 id="auth-modal-title" data-i18n="auth_modal_title">Xác thực Google One Pool Daemon</h3>
+        </div>
+        <form id="auth-form" class="modal-body">
+          <p class="muted-small" data-i18n="auth_modal_desc">
+            Mở Dashboard bằng lệnh "gpool dashboard" hoặc từ Menu Bar để đăng nhập tự động, hoặc dán token từ ~/.google-one-pool/daemon.token:
+          </p>
+          <input
+            type="password"
+            id="auth-token-input"
+            data-i18n-placeholder="auth_token_placeholder"
+            placeholder="Dán daemon token (64 ký tự hex)"
+            autocomplete="off"
+            required
+          />
+          <p class="form-error" id="auth-form-error" hidden></p>
+          <div class="modal-footer">
+            <button type="submit" class="btn btn-primary" id="btn-auth-submit" data-i18n="auth_submit">Mở khóa Dashboard</button>
+          </div>
+        </form>
       </div>
     </div>
 

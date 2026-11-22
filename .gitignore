@@ -5,3 +5,11 @@ dist/
 *.log
 .DS_Store
 node_modules/
+.env
+.env.*
+!.env.example
+*.gpool.enc
+*.enc
+google-one-pool-*.json
+*.pem
+*.key

@@ -77,6 +77,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         URL(string: "http://127.0.0.1:\(port)")!
     }
 
+    private func readDaemonToken() -> String? {
+        let homeDir: String
+        if let customHome = ProcessInfo.processInfo.environment["GPOOL_HOME"], !customHome.isEmpty {
+            homeDir = (customHome as NSString).expandingTildeInPath
+        } else {
+            homeDir = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".google-one-pool")
+                .path
+        }
+        let tokenURL = URL(fileURLWithPath: homeDir).appendingPathComponent("daemon.token")
+        guard let raw = try? String(contentsOf: tokenURL, encoding: .utf8) else {
+            return nil
+        }
+        let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApplication.shared.setActivationPolicy(.accessory)
 
@@ -114,6 +131,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let url = baseURL.appendingPathComponent("api/accounts")
         var req = URLRequest(url: url)
         req.timeoutInterval = 3.0
+        if let token = readDaemonToken() {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
 
         do {
             let (data, response) = try await URLSession.shared.data(for: req)
@@ -421,6 +441,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     @objc private func handleOpenDashboard() {
+        if let token = readDaemonToken(),
+           let encoded = token.addingPercentEncoding(withAllowedCharacters: .urlQueryAllowed),
+           let authURL = URL(string: "http://127.0.0.1:\(port)/auth?token=\(encoded)") {
+            NSWorkspace.shared.open(authURL)
+            return
+        }
         NSWorkspace.shared.open(baseURL)
     }
 
@@ -439,6 +465,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         var req = URLRequest(url: url)
         req.httpMethod = "POST"
         req.timeoutInterval = 15.0
+        if let token = readDaemonToken() {
+            req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        }
         if let body {
             req.setValue("application/json", forHTTPHeaderField: "Content-Type")
             req.httpBody = try? JSONSerialization.data(withJSONObject: body)

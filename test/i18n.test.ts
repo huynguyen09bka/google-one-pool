@@ -109,7 +109,10 @@ describe('Bilingual i18n (English & Vietnamese)', () => {
 
       const patchRes = await fetch(`${base}/api/settings`, {
         method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${srv.authToken}`,
+        },
         body: JSON.stringify({ language: 'en' }),
       });
       assert.equal(patchRes.status, 200);

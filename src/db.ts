@@ -6,8 +6,12 @@ import {
   ensureDirectories,
   getDefaultSettings,
   normalizeTags,
+  redactProxyUrl,
+  validateAdcCredentialsPath,
   validateAlias,
   validateBucketName,
+  validateChromeBinary,
+  validateChromeProfileName,
   validateEmail,
   validateLocale,
   validatePlanTier,
@@ -329,6 +333,15 @@ export class PoolDB {
       }
     }
 
+    let chromeBinary = defaults.chrome_binary;
+    if (typeof merged.chrome_binary === 'string' && merged.chrome_binary.trim()) {
+      try {
+        chromeBinary = validateChromeBinary(merged.chrome_binary);
+      } catch {
+        chromeBinary = defaults.chrome_binary;
+      }
+    }
+
     return {
       keepalive_enabled: Boolean(merged.keepalive_enabled),
       keepalive_interval_minutes: clampNumber(merged.keepalive_interval_minutes, 10, 1440, defaults.keepalive_interval_minutes),
@@ -336,10 +349,7 @@ export class PoolDB {
       keepalive_stagger_seconds: clampNumber(merged.keepalive_stagger_seconds, 0, 300, defaults.keepalive_stagger_seconds),
       default_cooldown_hours: clampNumber(merged.default_cooldown_hours, 0.25, 720, defaults.default_cooldown_hours),
       notify_on_expiry: Boolean(merged.notify_on_expiry),
-      chrome_binary:
-        typeof merged.chrome_binary === 'string' && merged.chrome_binary.trim()
-          ? merged.chrome_binary.trim()
-          : defaults.chrome_binary,
+      chrome_binary: chromeBinary,
       default_open_url:
         typeof merged.default_open_url === 'string' && merged.default_open_url.trim()
           ? merged.default_open_url.trim()
@@ -375,7 +385,7 @@ export class PoolDB {
         partial.notify_on_expiry !== undefined ? Boolean(partial.notify_on_expiry) : current.notify_on_expiry,
       chrome_binary:
         partial.chrome_binary !== undefined && partial.chrome_binary.trim()
-          ? partial.chrome_binary.trim()
+          ? validateChromeBinary(partial.chrome_binary)
           : current.chrome_binary,
       default_open_url:
         partial.default_open_url !== undefined && partial.default_open_url.trim()
@@ -431,7 +441,7 @@ export class PoolDB {
     const tags = normalizeTags(input.tags);
     const notes = (input.notes ?? '').trim();
     const proxyUrl = validateProxyUrl(input.proxy_url);
-    const adcPath = input.adc_credentials_path?.trim() || null;
+    const adcPath = validateAdcCredentialsPath(input.adc_credentials_path);
     const profileMode: ProfileMode = input.profile_mode === 'linked' ? 'linked' : 'isolated';
 
     if (this.getAccountByAlias(alias)) {
@@ -598,7 +608,7 @@ export class PoolDB {
     const nextProxyUrl = patch.proxy_url !== undefined ? validateProxyUrl(patch.proxy_url) : existing.proxy_url;
     const nextAdcPath =
       patch.adc_credentials_path !== undefined
-        ? patch.adc_credentials_path?.trim() || null
+        ? validateAdcCredentialsPath(patch.adc_credentials_path)
         : existing.adc_credentials_path;
 
     const nextProfileMode: ProfileMode =
@@ -1206,7 +1216,7 @@ export class PoolDB {
     }));
   }
 
-  exportMetadata(): PoolExportPayload {
+  exportMetadata(options: { includeSensitiveProxyCredentials?: boolean } = {}): PoolExportPayload {
     const accounts = this.listAccounts().map((acc) => ({
       alias: acc.alias,
       email: acc.email,
@@ -1215,7 +1225,7 @@ export class PoolDB {
       renewal_date: acc.renewal_date,
       tags: acc.tags,
       notes: acc.notes,
-      proxy_url: acc.proxy_url,
+      proxy_url: options.includeSensitiveProxyCredentials ? acc.proxy_url : redactProxyUrl(acc.proxy_url),
       adc_credentials_path: acc.adc_credentials_path,
       profile_mode: acc.profile_mode,
       chrome_user_data_dir: acc.chrome_user_data_dir,
@@ -1231,7 +1241,10 @@ export class PoolDB {
     };
   }
 
-  importMetadata(payload: PoolExportPayload): { created: number; updated: number } {
+  importMetadata(
+    payload: PoolExportPayload,
+    options: { allowHostPaths?: boolean } = {},
+  ): { created: number; updated: number } {
     if (!payload || typeof payload !== 'object' || !Array.isArray(payload.accounts)) {
       throw new Error('Dữ liệu import không hợp lệ (thiếu danh sách accounts).');
     }
@@ -1245,6 +1258,7 @@ export class PoolDB {
       }
       const normalizedAlias = validateAlias(item.alias);
       const existing = this.getAccountByAlias(normalizedAlias) ?? this.getAccountByEmail(item.email);
+      const safeAdcPath = options.allowHostPaths ? item.adc_credentials_path : undefined;
       if (existing) {
         this.updateAccount(existing.id, {
           alias: normalizedAlias,
@@ -1255,7 +1269,7 @@ export class PoolDB {
           tags: item.tags,
           notes: item.notes,
           proxy_url: item.proxy_url,
-          adc_credentials_path: item.adc_credentials_path,
+          ...(safeAdcPath !== undefined ? { adc_credentials_path: safeAdcPath } : {}),
           profile_mode: item.profile_mode,
           chrome_user_data_dir: item.chrome_user_data_dir,
           chrome_profile_name: item.chrome_profile_name,
@@ -1272,7 +1286,7 @@ export class PoolDB {
           tags: item.tags,
           notes: item.notes,
           proxy_url: item.proxy_url,
-          adc_credentials_path: item.adc_credentials_path,
+          adc_credentials_path: safeAdcPath ?? null,
           profile_mode: item.profile_mode,
           chrome_user_data_dir: item.chrome_user_data_dir,
           chrome_profile_name: item.chrome_profile_name,
@@ -1283,7 +1297,9 @@ export class PoolDB {
     }
 
     if (payload.settings && typeof payload.settings === 'object') {
-      this.updateSettings(payload.settings);
+      // Never allow imported metadata bundles to silently overwrite host executable paths.
+      const { chrome_binary: _ignoredBinary, ...safeSettings } = payload.settings;
+      this.updateSettings(safeSettings);
     }
 
     this.addEvent(null, null, 'import', `Import metadata: thêm ${created}, cập nhật ${updated} tài khoản`);
@@ -1313,12 +1329,4 @@ function validateHttpOpenUrl(raw: string): string {
     throw new Error(`URL mặc định phải là http:// hoặc https:// ("${trimmed}").`);
   }
   return trimmed;
-}
-
-function validateChromeProfileName(raw: string): string {
-  const clean = raw.trim();
-  if (!clean || clean.includes('/') || clean.includes('\\') || clean === '.' || clean === '..') {
-    throw new Error(`Tên Chrome profile không hợp lệ ("${raw}"). Ví dụ: "Default" hoặc "Profile 1".`);
-  }
-  return clean;
 }

@@ -81,11 +81,18 @@ describe('Daemon HTTP Server', () => {
       fs.rmSync(homeDir, { recursive: true, force: true });
     });
 
-    return { baseUrl, port, db, openedCalls };
+    return {
+      baseUrl,
+      port,
+      db,
+      openedCalls,
+      authToken: serverHandle.authToken,
+      authHeaders: { Authorization: `Bearer ${serverHandle.authToken}` },
+    };
   }
 
   it('serves dashboard static assets and enforces loopback Origin CSRF protection', async () => {
-    const { baseUrl, port } = await startTestServer();
+    const { baseUrl, port, authHeaders } = await startTestServer();
 
     const htmlRes = await fetch(`${baseUrl}/`);
     assert.equal(htmlRes.status, 200);
@@ -105,6 +112,7 @@ describe('Daemon HTTP Server', () => {
     const evilPost = await fetch(`${baseUrl}/api/accounts`, {
       method: 'POST',
       headers: {
+        ...authHeaders,
         'Content-Type': 'application/json',
         Origin: 'https://evil.example',
       },
@@ -115,6 +123,7 @@ describe('Daemon HTTP Server', () => {
     const localPost = await fetch(`${baseUrl}/api/accounts`, {
       method: 'POST',
       headers: {
+        ...authHeaders,
         'Content-Type': 'application/json',
         Origin: `http://127.0.0.1:${port}`,
       },
@@ -124,7 +133,7 @@ describe('Daemon HTTP Server', () => {
   });
 
   it('handles full account lifecycle, switching, rotation, OAuth validation, cooldowns, keepalive, and export/import', async () => {
-    const { baseUrl, openedCalls } = await startTestServer();
+    const { baseUrl, openedCalls, authHeaders } = await startTestServer();
 
     for (const acc of [
       { alias: 'pro1', email: 'pro1@example.com', tags: ['pro', 'primary'] },
@@ -133,20 +142,20 @@ describe('Daemon HTTP Server', () => {
     ]) {
       const r = await fetch(`${baseUrl}/api/accounts`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify(acc),
       });
       assert.equal(r.status, 201);
     }
 
-    const sweepRes = await fetch(`${baseUrl}/api/keepalive/sweep`, { method: 'POST' });
+    const sweepRes = await fetch(`${baseUrl}/api/keepalive/sweep`, { method: 'POST', headers: authHeaders });
     assert.equal(sweepRes.status, 200);
     const sweepJson = (await sweepRes.json()) as { results: Array<{ alias: string; status: string }> };
     assert.equal(sweepJson.results.length, 3);
 
     const swRes = await fetch(`${baseUrl}/api/accounts/pro1/switch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ openChrome: true }),
     });
     assert.equal(swRes.status, 200);
@@ -156,7 +165,7 @@ describe('Daemon HTTP Server', () => {
 
     const nextRes = await fetch(`${baseUrl}/api/pool/next`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ cooldownHours: 5, openChrome: true }),
     });
     assert.equal(nextRes.status, 200);
@@ -165,32 +174,32 @@ describe('Daemon HTTP Server', () => {
 
     const badOAuth = await fetch(`${baseUrl}/api/accounts/pro2/oauth`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ oauthUrl: 'javascript:alert(1)' }),
     });
     assert.equal(badOAuth.status, 400);
 
     const goodOAuth = await fetch(`${baseUrl}/api/accounts/pro2/oauth`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ oauthUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=test' }),
     });
     assert.equal(goodOAuth.status, 200);
     assert.ok(openedCalls.some((c) => c.urls[0].includes('accounts.google.com/o/oauth2')));
 
-    const clearRes = await fetch(`${baseUrl}/api/accounts/pro1/cooldown`, { method: 'DELETE' });
+    const clearRes = await fetch(`${baseUrl}/api/accounts/pro1/cooldown`, { method: 'DELETE', headers: authHeaders });
     assert.equal(clearRes.status, 200);
 
-    const exportRes = await fetch(`${baseUrl}/api/export`);
+    const exportRes = await fetch(`${baseUrl}/api/export`, { headers: authHeaders });
     assert.equal(exportRes.status, 200);
     const exported = await exportRes.json();
 
-    const delRes = await fetch(`${baseUrl}/api/accounts/expired?purgeProfile=true`, { method: 'DELETE' });
+    const delRes = await fetch(`${baseUrl}/api/accounts/expired?purgeProfile=true`, { method: 'DELETE', headers: authHeaders });
     assert.equal(delRes.status, 200);
 
     const importRes = await fetch(`${baseUrl}/api/import`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify(exported),
     });
     assert.equal(importRes.status, 200);
@@ -227,7 +236,7 @@ describe('Daemon HTTP Server', () => {
       fs.rmSync(fakeChromeDir, { recursive: true, force: true });
     });
 
-    const { baseUrl, openedCalls } = await startTestServer([
+    const { baseUrl, openedCalls, authHeaders } = await startTestServer([
       {
         browser: 'Google Chrome',
         chromeBinary: '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
@@ -235,7 +244,7 @@ describe('Daemon HTTP Server', () => {
       },
     ]);
 
-    const discoverRes = await fetch(`${baseUrl}/api/import/chrome/discover`);
+    const discoverRes = await fetch(`${baseUrl}/api/import/chrome/discover`, { headers: authHeaders });
     assert.equal(discoverRes.status, 200);
     const discoverJson = (await discoverRes.json()) as {
       discoveredAccounts: Array<{ email: string; suggestedAlias: string; hasCookies: boolean }>;
@@ -245,7 +254,7 @@ describe('Daemon HTTP Server', () => {
     // Bulk import both discovered accounts in linked mode (plus a duplicate to verify dedup).
     const importRes = await fetch(`${baseUrl}/api/import/chrome`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         mode: 'linked',
         chrome_user_data_dir: fakeChromeDir,
@@ -271,12 +280,12 @@ describe('Daemon HTTP Server', () => {
     // Switching & OAuth on linked account decorates URLs with authuser / login_hint.
     await fetch(`${baseUrl}/api/accounts/second/switch`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ openChrome: true }),
     });
     await fetch(`${baseUrl}/api/accounts/second/oauth`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ oauthUrl: 'https://accounts.google.com/o/oauth2/v2/auth?client_id=abc' }),
     });
 
@@ -289,7 +298,7 @@ describe('Daemon HTTP Server', () => {
     // Graduate second -> isolated.
     const isoRes = await fetch(`${baseUrl}/api/accounts/second/isolate`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({ openChrome: true }),
     });
     assert.equal(isoRes.status, 200);
@@ -303,10 +312,10 @@ describe('Daemon HTTP Server', () => {
   });
 
   it('imports messy rawText Google Account Chooser copy-pastes via POST /api/import/chrome', async () => {
-    const { baseUrl } = await startTestServer();
+    const { baseUrl, authHeaders } = await startTestServer();
     const res = await fetch(`${baseUrl}/api/import/chrome`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: { ...authHeaders, 'Content-Type': 'application/json' },
       body: JSON.stringify({
         mode: 'linked',
         chrome_profile_name: 'Default',
@@ -335,7 +344,7 @@ describe('Daemon HTTP Server', () => {
     assert.equal(json.created[1].display_name, 'Backup Acc');
 
     // Batch isolate all linked accounts via POST /api/accounts/isolate-all.
-    const isoAllRes = await fetch(`${baseUrl}/api/accounts/isolate-all`, { method: 'POST' });
+    const isoAllRes = await fetch(`${baseUrl}/api/accounts/isolate-all`, { method: 'POST', headers: authHeaders });
     assert.equal(isoAllRes.status, 200);
     const isoAllJson = (await isoAllRes.json()) as {
       ok: boolean;
@@ -348,13 +357,13 @@ describe('Daemon HTTP Server', () => {
     assert.equal(isoAllJson.isolated[0].session_status, 'unknown');
 
     // Open pre-filled Google Sign-In via /login, then confirm login via /confirm-login.
-    const loginRes = await fetch(`${baseUrl}/api/accounts/raw1/login`, { method: 'POST' });
+    const loginRes = await fetch(`${baseUrl}/api/accounts/raw1/login`, { method: 'POST', headers: authHeaders });
     assert.equal(loginRes.status, 200);
     const loginJson = (await loginRes.json()) as { ok: boolean; url: string };
     assert.equal(loginJson.ok, true);
     assert.ok(loginJson.url.includes('Email=raw1%40gmail.com'));
 
-    const confirmRes = await fetch(`${baseUrl}/api/accounts/raw1/confirm-login`, { method: 'POST' });
+    const confirmRes = await fetch(`${baseUrl}/api/accounts/raw1/confirm-login`, { method: 'POST', headers: authHeaders });
     assert.equal(confirmRes.status, 200);
     const confirmJson = (await confirmRes.json()) as {
       ok: boolean;

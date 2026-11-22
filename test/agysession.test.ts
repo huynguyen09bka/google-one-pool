@@ -7,6 +7,7 @@ import {
   activateAgySession,
   captureAgySession,
   deleteSessionFilesForAlias,
+  exportDecryptedSessions,
   getAgySessionStatus,
   getLiveKeychainContext,
   hasSessionSnapshot,
@@ -17,6 +18,16 @@ import {
 import { resolvePaths } from '../src/config.ts';
 import { PoolDB } from '../src/db.ts';
 
+function tokenizeInteractiveLine(line: string): string[] {
+  const tokens: string[] = [];
+  const regex = /"((?:\\.|[^"\\])*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(line)) !== null) {
+    tokens.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : m[2]);
+  }
+  return tokens;
+}
+
 /**
  * Mô phỏng `/usr/bin/security` cho item generic password "gemini"/"antigravity"
  * bằng Map trong RAM — không đụng keychain thật.
@@ -24,17 +35,19 @@ import { PoolDB } from '../src/db.ts';
 function makeFakeKeychain(initial?: Buffer) {
   const store = new Map<string, Buffer>();
   if (initial) store.set('gemini\0antigravity', Buffer.from(initial));
-  const run = (args: string[]): SecurityRunResult => {
-    const val = (flag: string) => args[args.indexOf(flag) + 1];
-    if (args[0] === 'find-generic-password') {
+  const run = (args: string[], stdin?: string): SecurityRunResult => {
+    const tokens = args[0] === '-i' && stdin ? tokenizeInteractiveLine(stdin.trim()) : args;
+    const val = (flag: string) => tokens[tokens.indexOf(flag) + 1];
+    if (tokens[0] === 'find-generic-password') {
       const blob = store.get(`${val('-s')}\0${val('-a')}`);
       if (!blob) {
         return { status: 44, stdout: Buffer.alloc(0), stderr: Buffer.from('could not be found') };
       }
       return { status: 0, stdout: Buffer.concat([blob, Buffer.from('\n')]), stderr: Buffer.alloc(0) };
     }
-    if (args[0] === 'add-generic-password') {
-      store.set(`${val('-s')}\0${val('-a')}`, Buffer.from(val('-w'), 'utf8'));
+    if (tokens[0] === 'add-generic-password') {
+      const data = tokens.includes('-X') ? Buffer.from(val('-X'), 'hex') : Buffer.from(val('-w'), 'utf8');
+      store.set(`${val('-s')}\0${val('-a')}`, data);
       return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     }
     return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from('unsupported') };
@@ -127,9 +140,15 @@ describe('agysession', () => {
 
     const res = captureAgySession(paths, acc, makeDeps({ home, kc }));
     assert.equal(res.detected_email, 'a1@example.com');
+    assert.equal(res.encrypted, true);
     assert.equal(hasSessionSnapshot(paths, 'a1'), true);
 
-    const snap = JSON.parse(fs.readFileSync(path.join(paths.agySessionsDir, 'a1.json'), 'utf8'));
+    const onDisk = JSON.parse(fs.readFileSync(path.join(paths.agySessionsDir, 'a1.json'), 'utf8'));
+    assert.equal(onDisk.version, 2);
+    assert.equal(onDisk.encrypted, true);
+    assert.equal(onDisk.keychain_blob_b64, undefined);
+
+    const [snap] = exportDecryptedSessions(paths, makeDeps({ home, kc }));
     assert.equal(snap.user_scope, 'u-scope-AAA');
     assert.ok(snap.extra_files['antigravity-oauth-token']);
     const marker = JSON.parse(fs.readFileSync(path.join(paths.agySessionsDir, '_active.json'), 'utf8'));
@@ -201,10 +220,13 @@ describe('agysession', () => {
     kc.set(blobFor('a1@example.com', 'v2'));
 
     const res = activateAgySession(paths, a2, {}, makeDeps({ home, kc }));
-    // chủ hiện tại = a1 theo marker -> recapture blob mới vào a1
+    // chủ hiện tại = a1 theo marker -> recapture blob mới vào a1 (vẫn mã hóa AES-256-GCM)
     assert.equal(res.recaptured_alias, 'a1');
-    const snapA1 = JSON.parse(fs.readFileSync(path.join(paths.agySessionsDir, 'a1.json'), 'utf8'));
-    assert.ok(snapA1.keychain_blob_b64 === Buffer.from(blobFor('a1@example.com', 'v2')).toString('base64'));
+    const onDiskA1 = JSON.parse(fs.readFileSync(path.join(paths.agySessionsDir, 'a1.json'), 'utf8'));
+    assert.equal(onDiskA1.version, 2);
+    assert.equal(onDiskA1.encrypted, true);
+    const decryptedA1 = exportDecryptedSessions(paths, makeDeps({ home, kc })).find((s) => s.alias === 'a1');
+    assert.ok(decryptedA1?.keychain_blob_b64 === Buffer.from(blobFor('a1@example.com', 'v2')).toString('base64'));
     assert.equal(emailOf(kc.current()!), 'a2@example.com');
     db.close();
   });
@@ -301,7 +323,7 @@ describe('agysession', () => {
     const paths = resolvePaths(poolHome);
     const db = new PoolDB(paths);
     const a1 = db.createAccount({ alias: 'a1', email: 'a1@example.com' });
-    captureAgySession(paths, a1, makeDeps({ home, kc }));
+    captureAgySession(paths, a1, { ...makeDeps({ home, kc }), encrypt: false });
 
     db.updateAccount('a1', { alias: 'pro-main' });
     assert.equal(hasSessionSnapshot(paths, 'a1'), false);

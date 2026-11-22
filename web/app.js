@@ -25,6 +25,30 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
+let sseSource = null;
+
+function redactProxyUrl(raw) {
+  if (!raw) return '';
+  try {
+    const parsed = new URL(raw);
+    if (parsed.username || parsed.password) {
+      const hostPort = parsed.port ? `${parsed.hostname}:${parsed.port}` : parsed.hostname;
+      return `${parsed.protocol}//***@${hostPort}`;
+    }
+    return raw;
+  } catch {
+    return String(raw).replace(/\/\/[^/@]+@/, '//***@');
+  }
+}
+
+function showAuthModal() {
+  const modal = el('auth-modal');
+  if (modal && modal.hidden) {
+    el('auth-form-error').hidden = true;
+    modal.hidden = false;
+    el('auth-token-input')?.focus();
+  }
+}
 
 async function api(path, options = {}) {
   const headers = { ...(options.headers || {}) };
@@ -33,6 +57,12 @@ async function api(path, options = {}) {
   }
   const res = await fetch(path, { ...options, headers });
   const data = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    showAuthModal();
+    const err = new Error(data.error || 'Yêu cầu xác thực daemon token.');
+    err.status = 401;
+    throw err;
+  }
   if (!res.ok) {
     throw new Error(data.error || `HTTP ${res.status}`);
   }
@@ -176,7 +206,9 @@ async function refreshAll() {
     state.cooldownTickTriggeredRefresh = false;
     renderAll();
   } catch (err) {
-    showToast(`Không tải được dữ liệu: ${err.message}`, 'error');
+    if (err?.status !== 401) {
+      showToast(`Không tải được dữ liệu: ${err.message}`, 'error');
+    }
   }
 }
 
@@ -656,7 +688,7 @@ function createAccountCard(acc) {
   if (acc.renewal_date) {
     metaParts.push(t('meta_renewal', { date: acc.renewal_date }));
   }
-  if (acc.proxy_url) metaParts.push(`Proxy: ${acc.proxy_url}`);
+  if (acc.proxy_url) metaParts.push(`Proxy: ${redactProxyUrl(acc.proxy_url)}`);
   meta.textContent = metaParts.join(' • ');
   card.appendChild(meta);
 
@@ -1588,9 +1620,17 @@ function closeModal(id) {
 }
 
 function connectSSE() {
+  if (sseSource) {
+    try {
+      sseSource.close();
+    } catch {
+      // Ignore.
+    }
+  }
   const sseDot = el('sse-dot');
   const sseText = el('sse-text');
   const source = new EventSource('/api/events/stream');
+  sseSource = source;
 
   source.addEventListener('open', () => {
     setSseConnected();
@@ -1940,11 +1980,42 @@ function bindEvents() {
   // Click backdrop outside modal to close
   for (const backdrop of document.querySelectorAll('.modal-backdrop')) {
     backdrop.addEventListener('click', (e) => {
-      if (e.target === backdrop) {
+      if (e.target === backdrop && backdrop.id !== 'auth-modal') {
         backdrop.hidden = true;
       }
     });
   }
+
+  el('auth-form')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const errEl = el('auth-form-error');
+    const submitBtn = el('btn-auth-submit');
+    const tokenInput = el('auth-token-input');
+    const token = tokenInput.value.trim();
+    errEl.hidden = true;
+    if (!token) return;
+    submitBtn.disabled = true;
+    try {
+      const res = await fetch('/api/auth/session', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error || `HTTP ${res.status}`);
+      }
+      tokenInput.value = '';
+      closeModal('auth-modal');
+      connectSSE();
+      await refreshAll();
+    } catch (err) {
+      errEl.textContent = err.message;
+      errEl.hidden = false;
+    } finally {
+      submitBtn.disabled = false;
+    }
+  });
 
   el('account-form').addEventListener('submit', async (e) => {
     e.preventDefault();
@@ -2077,8 +2148,8 @@ function bindEvents() {
 
   el('btn-export-encrypted').addEventListener('click', async () => {
     const passphrase = el('backup-passphrase').value;
-    if (!passphrase || passphrase.length < 6) {
-      showToast('Hãy nhập mật khẩu mã hóa ít nhất 6 ký tự trước khi xuất.', 'warn');
+    if (!passphrase || passphrase.length < 12) {
+      showToast('Hãy nhập mật khẩu mã hóa ít nhất 12 ký tự trước khi xuất.', 'warn');
       el('backup-passphrase').focus();
       return;
     }

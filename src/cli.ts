@@ -2,7 +2,12 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
-import { decryptBackupBundle, encryptBackupBundle, isEncryptedBackupBundle } from './agycrypto.ts';
+import {
+  BACKUP_MIN_PASSPHRASE_LENGTH,
+  decryptBackupBundle,
+  encryptBackupBundle,
+  isEncryptedBackupBundle,
+} from './agycrypto.ts';
 import { readAgyLease, releaseAgyLease } from './agylock.ts';
 import { runAgyOnboardWizard } from './agy-onboard.ts';
 import { runAgyWithFailover } from './agy-runner.ts';
@@ -32,12 +37,16 @@ import {
 import { isAccountChromeRunning } from './chrome.ts';
 import {
   DEFAULT_HOST,
+  readDaemonToken,
+  redactProxyUrl,
   resolvePaths,
   resolvePort,
   validateAlias,
+  validateChromeProfileName,
   validateEmail,
   validateLocale,
   validateRotationPolicy,
+  writeFileRestricted,
   type PoolPaths,
 } from './config.ts';
 import { PoolDB } from './db.ts';
@@ -466,7 +475,7 @@ async function handleShow(args: string[], paths: PoolPaths, port: number, asJson
     console.log(`Chrome profile: ${account.chrome_profile_dir}`);
     if (account.renewal_date) console.log(`Gia hạn:        ${account.renewal_date}`);
     if (account.tags.length) console.log(`Tags:           ${account.tags.join(', ')}`);
-    if (account.proxy_url) console.log(`Proxy:          ${account.proxy_url}`);
+    if (account.proxy_url) console.log(`Proxy:          ${redactProxyUrl(account.proxy_url)}`);
     if (account.cooldown_remaining_ms > 0) console.log(`Cooldown còn:   ${formatShortMs(account.cooldown_remaining_ms)}`);
     if (account.bucket_cooldowns && account.bucket_cooldowns.length > 0) {
       const bList = account.bucket_cooldowns
@@ -796,9 +805,10 @@ async function handleNext(
 
   let res;
   if (await isDaemonAlive(port)) {
+    const headers: Record<string, string> = { 'Content-Type': 'application/json', ...daemonAuthHeaders(paths) };
     const httpRes = await fetch(`http://${DEFAULT_HOST}:${port}/api/pool/next`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers,
       body: JSON.stringify(payload),
     });
     res = await httpRes.json().catch(() => ({ ok: false, error: `HTTP ${httpRes.status}` }));
@@ -908,7 +918,10 @@ async function handleAgyWrapper(
 
   // Best-effort sync running daemon so Web Dashboard updates live
   if (await isDaemonAlive(port)) {
-    await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, { method: 'POST' }).catch(() => {});
+    await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, {
+      method: 'POST',
+      headers: daemonAuthHeaders(paths),
+    }).catch(() => {});
   }
 
   if (asJson) {
@@ -1068,7 +1081,10 @@ async function handleAgyOnboard(
       timeoutSeconds: timeoutRaw ? Number(timeoutRaw) : 180,
       onAccountCaptured: async () => {
         if (await isDaemonAlive(port)) {
-          await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, { method: 'POST' }).catch(() => {});
+          await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, {
+            method: 'POST',
+            headers: daemonAuthHeaders(paths),
+          }).catch(() => {});
         }
       },
     });
@@ -1763,7 +1779,14 @@ async function executeBulkImport(
       }
 
       const userDataDir = (item.chrome_user_data_dir ?? payload.chrome_user_data_dir ?? defaultUserDataDir).trim();
-      const profileName = (item.chrome_profile_name ?? payload.chrome_profile_name ?? 'Default').trim() || 'Default';
+      const rawProfileName = (item.chrome_profile_name ?? payload.chrome_profile_name ?? 'Default').trim() || 'Default';
+      let profileName: string;
+      try {
+        profileName = validateChromeProfileName(rawProfileName);
+      } catch (err) {
+        errors.push({ email, error: err instanceof Error ? err.message : String(err) });
+        continue;
+      }
       let hasCookies = false;
       if (typeof item.has_cookies === 'boolean') {
         hasCookies = item.has_cookies;
@@ -1889,7 +1912,7 @@ async function handleDaemon(
 
     const actualPort = await serverHandle.start();
     scheduler.start();
-    fs.writeFileSync(paths.pidPath, String(process.pid), { encoding: 'utf8', mode: 0o600 });
+    writeFileRestricted(paths.pidPath, String(process.pid));
 
     console.log(`Google One Pool daemon đang chạy tại http://${DEFAULT_HOST}:${actualPort} (PID ${process.pid})`);
 
@@ -1999,11 +2022,13 @@ async function handleDashboard(paths: PoolPaths, port: number): Promise<number> 
   if (!(await isDaemonAlive(port))) {
     await handleDaemon(['start'], new Map(), paths, port, false);
   }
-  const url = `http://${DEFAULT_HOST}:${port}`;
+  const baseUrl = `http://${DEFAULT_HOST}:${port}`;
+  const token = readDaemonToken(paths);
+  const openUrl = token ? `${baseUrl}/auth?token=${encodeURIComponent(token)}` : baseUrl;
   if (process.platform === 'darwin') {
-    execFile('/usr/bin/open', [url], () => {});
+    execFile('/usr/bin/open', [openUrl], () => {});
   }
-  console.log(`Web Dashboard đang mở tại: ${url}`);
+  console.log(`Web Dashboard đang mở tại: ${baseUrl}`);
   return 0;
 }
 
@@ -2082,15 +2107,70 @@ async function handleLaunchAgent(
 
 async function promptPassphrase(promptText: string): Promise<string> {
   if (!process.stdin.isTTY) {
-    throw new Error('Cần truyền --passphrase "<mật khẩu>" khi chạy ở chế độ không tương tác.');
+    throw new Error(
+      'Cần truyền --passphrase-file <file> hoặc biến môi trường GPOOL_BACKUP_PASSPHRASE khi chạy không tương tác.',
+    );
   }
-  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
-  try {
-    const ans = await rl.question(promptText);
-    return ans.trim();
-  } finally {
-    rl.close();
+  return await new Promise<string>((resolve, reject) => {
+    process.stderr.write(promptText);
+    const stdin = process.stdin;
+    const wasRaw = Boolean(stdin.isRaw);
+    if (stdin.setRawMode) stdin.setRawMode(true);
+    stdin.resume();
+
+    let buf = '';
+    const cleanup = () => {
+      stdin.off('data', onData);
+      if (stdin.setRawMode) stdin.setRawMode(wasRaw);
+      stdin.pause();
+    };
+    const onData = (chunk: Buffer) => {
+      const str = chunk.toString('utf8');
+      for (const ch of str) {
+        if (ch === '\u0003') {
+          cleanup();
+          process.stderr.write('\n');
+          reject(new Error('Đã hủy nhập mật khẩu.'));
+          return;
+        }
+        if (ch === '\r' || ch === '\n') {
+          cleanup();
+          process.stderr.write('\n');
+          resolve(buf.trim());
+          return;
+        }
+        if (ch === '\u007f' || ch === '\b') {
+          if (buf.length > 0) {
+            buf = Array.from(buf).slice(0, -1).join('');
+          }
+          continue;
+        }
+        if (ch >= ' ') {
+          buf += ch;
+        }
+      }
+    };
+    stdin.on('data', onData);
+  });
+}
+
+async function resolveBackupPassphrase(flags: Map<string, string | boolean>, promptText: string): Promise<string> {
+  const passFile = getStrFlag(flags, 'passphrase-file');
+  if (passFile) {
+    return fs.readFileSync(passFile, 'utf8').replace(/\r?\n$/, '');
   }
+  const envPass = process.env.GPOOL_BACKUP_PASSPHRASE;
+  if (envPass && envPass.length > 0) {
+    return envPass;
+  }
+  const cliPass = getStrFlag(flags, 'passphrase');
+  if (cliPass !== undefined) {
+    console.error(
+      'Cảnh báo bảo mật: --passphrase qua dòng lệnh có thể lưu trong shell history/ps. Hãy dùng --passphrase-file hoặc nhập tương tác.',
+    );
+    return cliPass;
+  }
+  return await promptPassphrase(promptText);
 }
 
 async function handleExport(
@@ -2104,9 +2184,10 @@ async function handleExport(
   const encrypted = Boolean(flags.get('encrypted')) || withSessions;
 
   if (encrypted) {
-    const passphrase =
-      getStrFlag(flags, 'passphrase') ??
-      (await promptPassphrase('Nhập mật khẩu mã hóa backup (>= 6 ký tự): '));
+    const passphrase = await resolveBackupPassphrase(
+      flags,
+      `Nhập mật khẩu mã hóa backup (>= ${BACKUP_MIN_PASSPHRASE_LENGTH} ký tự): `,
+    );
 
     let bundle: EncryptedBackupBundle;
     let sessionsCount = 0;
@@ -2124,7 +2205,7 @@ async function handleExport(
     } else {
       const db = new PoolDB(paths);
       try {
-        const metadata = db.exportMetadata();
+        const metadata = db.exportMetadata({ includeSensitiveProxyCredentials: true });
         const sessions = withSessions ? exportDecryptedSessions(paths) : [];
         sessionsCount = sessions.length;
         bundle = encryptBackupBundle({ metadata, agy_sessions: sessions }, passphrase, withSessions);
@@ -2135,7 +2216,7 @@ async function handleExport(
 
     const text = JSON.stringify(bundle, null, 2);
     if (outFile) {
-      fs.writeFileSync(outFile, text, { encoding: 'utf8', mode: 0o600 });
+      writeFileRestricted(outFile, text);
       console.log(
         `Đã xuất backup mã hóa AES-256-GCM ra ${outFile}` +
           (withSessions ? ` (kèm ${sessionsCount} phiên agy).` : ' (chỉ metadata).'),
@@ -2159,7 +2240,7 @@ async function handleExport(
   }
   const text = JSON.stringify(payload, null, 2);
   if (outFile) {
-    fs.writeFileSync(outFile, text, 'utf8');
+    writeFileRestricted(outFile, text);
     console.log(`Đã xuất metadata ra ${outFile}`);
   } else {
     console.log(text);
@@ -2175,13 +2256,11 @@ async function handleImport(
   asJson: boolean,
 ): Promise<number> {
   const [inFile] = args;
-  if (!inFile) throw new Error('Cú pháp: gpool import <file.json> [--passphrase "..."]');
+  if (!inFile) throw new Error('Cú pháp: gpool import <file.json> [--passphrase-file <file>]');
   const rawObj = JSON.parse(fs.readFileSync(inFile, 'utf8')) as unknown;
 
   if (isEncryptedBackupBundle(rawObj)) {
-    const passphrase =
-      getStrFlag(flags, 'passphrase') ??
-      (await promptPassphrase('Nhập mật khẩu giải mã file backup: '));
+    const passphrase = await resolveBackupPassphrase(flags, 'Nhập mật khẩu giải mã file backup: ');
 
     let res: { created: number; updated: number; sessions_imported: number; sessions_encrypted: number };
     if (await isDaemonAlive(port)) {
@@ -2316,8 +2395,16 @@ async function isDaemonAlive(port: number): Promise<boolean> {
   }
 }
 
+function daemonAuthHeaders(paths: PoolPaths = resolvePaths()): Record<string, string> {
+  const token = readDaemonToken(paths);
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
 async function callDaemon<T>(port: number, route: string, init: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+  const headers: Record<string, string> = {
+    ...daemonAuthHeaders(),
+    ...(init.headers as Record<string, string> | undefined),
+  };
   if (init.body !== undefined) {
     headers['Content-Type'] = 'application/json';
   }

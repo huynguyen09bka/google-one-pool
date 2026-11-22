@@ -18,20 +18,32 @@ import { createMcpHandler } from '../src/mcp.ts';
 import { createDaemonServer } from '../src/server.ts';
 import { PoolSwitcher } from '../src/switcher.ts';
 
+function tokenizeInteractiveLine(line: string): string[] {
+  const tokens: string[] = [];
+  const regex = /"((?:\\.|[^"\\])*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(line)) !== null) {
+    tokens.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : m[2]);
+  }
+  return tokens;
+}
+
 function makeFakeKeychain(initial?: Buffer) {
   const store = new Map<string, Buffer>();
   if (initial) store.set('gemini\0antigravity', Buffer.from(initial));
-  const run = (args: string[]): SecurityRunResult => {
-    const val = (flag: string) => args[args.indexOf(flag) + 1];
-    if (args[0] === 'find-generic-password') {
+  const run = (args: string[], stdin?: string): SecurityRunResult => {
+    const tokens = args[0] === '-i' && stdin ? tokenizeInteractiveLine(stdin.trim()) : args;
+    const val = (flag: string) => tokens[tokens.indexOf(flag) + 1];
+    if (tokens[0] === 'find-generic-password') {
       const blob = store.get(`${val('-s')}\0${val('-a')}`);
       if (!blob) {
         return { status: 44, stdout: Buffer.alloc(0), stderr: Buffer.from('not found') };
       }
       return { status: 0, stdout: Buffer.concat([blob, Buffer.from('\n')]), stderr: Buffer.alloc(0) };
     }
-    if (args[0] === 'add-generic-password') {
-      store.set(`${val('-s')}\0${val('-a')}`, Buffer.from(val('-w'), 'utf8'));
+    if (tokens[0] === 'add-generic-password') {
+      const data = tokens.includes('-X') ? Buffer.from(val('-X'), 'hex') : Buffer.from(val('-w'), 'utf8');
+      store.set(`${val('-s')}\0${val('-a')}`, data);
       return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     }
     return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from('unsupported') };
@@ -329,31 +341,33 @@ describe('Phase 1 + Phase 2: Lease Lock, Bucketed Cooldowns, Health, Failover & 
     const port = await srv.start();
     const base = `http://${DEFAULT_HOST}:${port}`;
 
+    const authHeaders = { Authorization: `Bearer ${srv.authToken}` };
+
     try {
       db.createAccount({ alias: 'api1', email: 'api1@example.com' });
 
       const cdPost = await fetch(`${base}/api/accounts/api1/cooldown`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ hours: 2, bucket: 'claude', reason: 'test' }),
       });
       assert.equal(cdPost.status, 200);
       const cdJson = (await cdPost.json()) as { account: { bucket_cooldowns: Array<{ bucket: string }> } };
       assert.equal(cdJson.account.bucket_cooldowns[0].bucket, 'claude');
 
-      const healthRes = await fetch(`${base}/api/agy/health`);
+      const healthRes = await fetch(`${base}/api/agy/health`, { headers: authHeaders });
       assert.equal(healthRes.status, 200);
       const healthJson = (await healthRes.json()) as { ok: boolean; summary: { missing_snapshot: number } };
       assert.equal(healthJson.ok, true);
       assert.equal(healthJson.summary.missing_snapshot, 1);
 
-      const leaseRes = await fetch(`${base}/api/agy/lease`);
+      const leaseRes = await fetch(`${base}/api/agy/lease`, { headers: authHeaders });
       assert.equal(leaseRes.status, 200);
 
-      const syncRes = await fetch(`${base}/api/sync`, { method: 'POST' });
+      const syncRes = await fetch(`${base}/api/sync`, { method: 'POST', headers: authHeaders });
       assert.equal(syncRes.status, 200);
 
-      const cdDel = await fetch(`${base}/api/accounts/api1/cooldown?bucket=claude`, { method: 'DELETE' });
+      const cdDel = await fetch(`${base}/api/accounts/api1/cooldown?bucket=claude`, { method: 'DELETE', headers: authHeaders });
       assert.equal(cdDel.status, 200);
       const cdDelJson = (await cdDel.json()) as { account: { bucket_cooldowns: unknown[] } };
       assert.equal(cdDelJson.account.bucket_cooldowns.length, 0);

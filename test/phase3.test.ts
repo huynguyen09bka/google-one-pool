@@ -35,20 +35,32 @@ import { createMcpHandler } from '../src/mcp.ts';
 import { createDaemonServer } from '../src/server.ts';
 import { PoolSwitcher } from '../src/switcher.ts';
 
+function tokenizeInteractiveLine(line: string): string[] {
+  const tokens: string[] = [];
+  const regex = /"((?:\\.|[^"\\])*)"|(\S+)/g;
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(line)) !== null) {
+    tokens.push(m[1] !== undefined ? m[1].replace(/\\(.)/g, '$1') : m[2]);
+  }
+  return tokens;
+}
+
 function makeFakeKeychain(initial?: Buffer) {
   const store = new Map<string, Buffer>();
   if (initial) store.set('gemini\0antigravity', Buffer.from(initial));
-  const run = (args: string[]): SecurityRunResult => {
-    const val = (flag: string) => args[args.indexOf(flag) + 1];
-    if (args[0] === 'find-generic-password') {
+  const run = (args: string[], stdin?: string): SecurityRunResult => {
+    const tokens = args[0] === '-i' && stdin ? tokenizeInteractiveLine(stdin.trim()) : args;
+    const val = (flag: string) => tokens[tokens.indexOf(flag) + 1];
+    if (tokens[0] === 'find-generic-password') {
       const blob = store.get(`${val('-s')}\0${val('-a')}`);
       if (!blob) {
         return { status: 44, stdout: Buffer.alloc(0), stderr: Buffer.from('not found') };
       }
       return { status: 0, stdout: Buffer.concat([blob, Buffer.from('\n')]), stderr: Buffer.alloc(0) };
     }
-    if (args[0] === 'add-generic-password') {
-      store.set(`${val('-s')}\0${val('-a')}`, Buffer.from(val('-w'), 'utf8'));
+    if (tokens[0] === 'add-generic-password') {
+      const data = tokens.includes('-X') ? Buffer.from(val('-X'), 'hex') : Buffer.from(val('-w'), 'utf8');
+      store.set(`${val('-s')}\0${val('-a')}`, data);
       return { status: 0, stdout: Buffer.alloc(0), stderr: Buffer.alloc(0) };
     }
     return { status: 1, stdout: Buffer.alloc(0), stderr: Buffer.from('unsupported') };
@@ -306,8 +318,10 @@ describe('Phase 3: AES-256-GCM Encryption, Encrypted Backup, Auto-Onboard & Anal
       assert.equal(report.summary.agy_encrypted_accounts, 1);
       assert.equal(report.summary.quota_hits_window, 1);
 
+      const authHeaders = { Authorization: `Bearer ${srv.authToken}` };
+
       // HTTP /api/analytics
-      const httpRes = await fetch(`${base}/api/analytics?days=7`);
+      const httpRes = await fetch(`${base}/api/analytics?days=7`, { headers: authHeaders });
       assert.equal(httpRes.status, 200);
       const httpJson = (await httpRes.json()) as { ok: boolean; summary: { total_accounts: number } };
       assert.equal(httpJson.ok, true);
@@ -316,7 +330,7 @@ describe('Phase 3: AES-256-GCM Encryption, Encrypted Backup, Auto-Onboard & Anal
       // HTTP encrypted export & import
       const expRes = await fetch(`${base}/api/export/encrypted`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ passphrase: 'secret-backup-key', withSessions: false }),
       });
       assert.equal(expRes.status, 200);
@@ -325,7 +339,7 @@ describe('Phase 3: AES-256-GCM Encryption, Encrypted Backup, Auto-Onboard & Anal
 
       const impRes = await fetch(`${base}/api/import/encrypted`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { ...authHeaders, 'Content-Type': 'application/json' },
         body: JSON.stringify({ passphrase: 'secret-backup-key', bundle: expJson.bundle }),
       });
       assert.equal(impRes.status, 200);

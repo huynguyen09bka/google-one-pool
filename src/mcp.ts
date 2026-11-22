@@ -11,7 +11,7 @@ import {
 } from './agysession.ts';
 import { computePoolAnalytics } from './analytics.ts';
 import { isAccountChromeRunning } from './chrome.ts';
-import { DEFAULT_HOST, validateBucketName, validateRotationPolicy, type PoolPaths } from './config.ts';
+import { DEFAULT_HOST, readDaemonToken, validateBucketName, validateRotationPolicy, type PoolPaths } from './config.ts';
 import { PoolDB } from './db.ts';
 import { PoolSwitcher } from './switcher.ts';
 import type { RotationPolicy } from './types.ts';
@@ -182,11 +182,15 @@ const MCP_TOOLS: McpToolDefinition[] = [
   },
 ];
 
-async function pingDaemonSync(port: number | undefined): Promise<void> {
+async function pingDaemonSync(paths: PoolPaths, port: number | undefined): Promise<void> {
   if (!port) return;
   try {
+    const token = readDaemonToken(paths);
+    const headers: Record<string, string> = {};
+    if (token) headers.Authorization = `Bearer ${token}`;
     await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, {
       method: 'POST',
+      headers,
       signal: AbortSignal.timeout(400),
     });
   } catch {
@@ -337,7 +341,7 @@ export function createMcpHandler(options: McpHandlerOptions) {
             'agy_session_activated',
             `MCP (${holder}) thuê và nạp phiên agy cho ${target.alias}`,
           );
-          if (shouldNotifyDaemon) void pingDaemonSync(port);
+          if (shouldNotifyDaemon) void pingDaemonSync(paths, port);
           return {
             ok: true,
             alias: target.alias,
@@ -353,8 +357,11 @@ export function createMcpHandler(options: McpHandlerOptions) {
       }
 
       if (name === 'agy_release') {
-        const released = releaseAgyLease(paths, { force: Boolean(args.force) || true });
-        if (shouldNotifyDaemon) void pingDaemonSync(port);
+        const released = releaseAgyLease(paths, {
+          expectedPid: process.pid,
+          force: Boolean(args.force),
+        });
+        if (shouldNotifyDaemon) void pingDaemonSync(paths, port);
         return { ok: true, released };
       }
 
@@ -416,7 +423,7 @@ export function createMcpHandler(options: McpHandlerOptions) {
           });
         }
 
-        if (shouldNotifyDaemon) void pingDaemonSync(port);
+        if (shouldNotifyDaemon) void pingDaemonSync(paths, port);
         return {
           ok: rotation ? rotation.ok : true,
           reported_alias: target.alias,
@@ -441,7 +448,7 @@ export function createMcpHandler(options: McpHandlerOptions) {
         if (!alias) throw new Error('Cần truyền tham số alias.');
         const bucket = typeof args.bucket === 'string' && args.bucket.trim() ? args.bucket.trim() : undefined;
         const updated = db.clearCooldown(alias, bucket);
-        if (shouldNotifyDaemon) void pingDaemonSync(port);
+        if (shouldNotifyDaemon) void pingDaemonSync(paths, port);
         return {
           ok: true,
           alias: updated.alias,
@@ -474,7 +481,7 @@ export function createMcpHandler(options: McpHandlerOptions) {
           processRunner,
           agyDeps,
         });
-        if (shouldNotifyDaemon) void pingDaemonSync(port);
+        if (shouldNotifyDaemon) void pingDaemonSync(paths, port);
         return result;
       }
 

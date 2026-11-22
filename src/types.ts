@@ -86,10 +86,17 @@ export interface AgyHealthReport {
   renewal_alerts: RenewalAlert[];
 }
 
+export interface EncryptedBackupKdfParams {
+  N: number;
+  r: number;
+  p: number;
+}
+
 export interface EncryptedBackupBundle {
   format: 'gpool-encrypted-backup';
-  version: 1;
+  version: 1 | 2;
   kdf: 'scrypt';
+  kdf_params?: EncryptedBackupKdfParams;
   alg: 'aes-256-gcm';
   salt_b64: string;
   iv_b64: string;

@@ -1,7 +1,7 @@
 const DICT = {
   vi: {
     page_title: 'Google One Pool — Quản lý tài khoản Google AI Pro',
-    brand_subtitle_html: 'Quản lý pool Google AI Pro cho <code>agy</code> CLI &amp; Chrome',
+    brand_subtitle_html: 'Quản lý pool Google AI Pro cho <code>agy</code> CLI & Chrome',
     sse_connecting: 'Đang kết nối...',
     sse_online: 'Trực tuyến',
     sse_reconnecting: 'Đang kết nối lại...',
@@ -134,8 +134,13 @@ const DICT = {
     backup_meta_title: 'Sao lưu / Khôi phục danh sách (chỉ metadata, không xuất cookie)',
     backup_meta_sub: 'Xuất file JSON để sao lưu danh sách email, tag, ghi chú và ngày gia hạn.',
     backup_enc_title: 'Backup mã hóa AES-256-GCM (chuyển máy kèm phiên agy)',
-    backup_enc_sub: 'Dùng mật khẩu riêng (≥ 6 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.',
-    backup_pass_placeholder: 'Mật khẩu mã hóa / giải mã (≥ 6 ký tự)',
+    backup_enc_sub: 'Dùng mật khẩu riêng (≥ 12 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.',
+    backup_pass_placeholder: 'Mật khẩu mã hóa / giải mã (≥ 12 ký tự)',
+    auth_modal_title: 'Xác thực Google One Pool Daemon',
+    auth_modal_desc:
+      'Mở Dashboard bằng lệnh "gpool dashboard" hoặc từ Menu Bar để đăng nhập tự động, hoặc dán token từ ~/.google-one-pool/daemon.token:',
+    auth_token_placeholder: 'Dán daemon token (64 ký tự hex)',
+    auth_submit: 'Mở khóa Dashboard',
     btn_export_json: 'Xuất JSON',
     btn_import_json: 'Nhập JSON',
     btn_export_enc: 'Xuất mã hóa (+agy)',
@@ -170,7 +175,7 @@ const DICT = {
   },
   en: {
     page_title: 'Google One Pool — Google AI Pro Account Pool Manager',
-    brand_subtitle_html: 'Google AI Pro account pool manager for <code>agy</code> CLI &amp; Chrome',
+    brand_subtitle_html: 'Google AI Pro account pool manager for <code>agy</code> CLI & Chrome',
     sse_connecting: 'Connecting...',
     sse_online: 'Online',
     sse_reconnecting: 'Reconnecting...',
@@ -303,8 +308,13 @@ const DICT = {
     backup_meta_title: 'Backup / Restore metadata (no cookies or tokens)',
     backup_meta_sub: 'Export JSON backup of emails, tags, notes, and renewal dates.',
     backup_enc_title: 'Encrypted AES-256-GCM Backup (portable + agy sessions)',
-    backup_enc_sub: 'Encrypt metadata + all agy session snapshots with a passphrase (≥ 6 chars) to move between Macs.',
-    backup_pass_placeholder: 'Encryption / decryption passphrase (≥ 6 chars)',
+    backup_enc_sub: 'Encrypt metadata + all agy session snapshots with a passphrase (≥ 12 chars) to move between Macs.',
+    backup_pass_placeholder: 'Encryption / decryption passphrase (≥ 12 chars)',
+    auth_modal_title: 'Authenticate Google One Pool Daemon',
+    auth_modal_desc:
+      'Open via "gpool dashboard" or the macOS Menu Bar to sign in automatically, or paste the token from ~/.google-one-pool/daemon.token:',
+    auth_token_placeholder: 'Paste daemon token (64 hex chars)',
+    auth_submit: 'Unlock Dashboard',
     btn_export_json: 'Export JSON',
     btn_import_json: 'Import JSON',
     btn_export_enc: 'Export Encrypted (+agy)',
@@ -360,6 +370,27 @@ export function t(key, vars = {}) {
   return text;
 }
 
+function renderSafeRichText(container, text) {
+  container.replaceChildren();
+  const stack = [container];
+  for (const part of String(text).split(/(<\/?(?:strong|code)>)/g)) {
+    if (!part) continue;
+    if (part === '<strong>' || part === '<code>') {
+      const tag = part.slice(1, -1);
+      const child = document.createElement(tag);
+      stack[stack.length - 1].appendChild(child);
+      stack.push(child);
+    } else if (part === '</strong>' || part === '</code>') {
+      const tag = part.slice(2, -1);
+      if (stack.length > 1 && stack[stack.length - 1].tagName.toLowerCase() === tag) {
+        stack.pop();
+      }
+    } else {
+      stack[stack.length - 1].appendChild(document.createTextNode(part));
+    }
+  }
+}
+
 export function applyStaticI18n() {
   document.title = t('page_title');
   document.documentElement.setAttribute('lang', currentLang);
@@ -367,7 +398,7 @@ export function applyStaticI18n() {
     node.textContent = t(node.dataset.i18n);
   }
   for (const node of document.querySelectorAll('[data-i18n-html]')) {
-    node.innerHTML = t(node.dataset.i18nHtml);
+    renderSafeRichText(node, t(node.dataset.i18nHtml));
   }
   for (const node of document.querySelectorAll('[data-i18n-placeholder]')) {
     node.setAttribute('placeholder', t(node.dataset.i18nPlaceholder));

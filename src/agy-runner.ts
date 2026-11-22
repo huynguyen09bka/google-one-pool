@@ -454,7 +454,10 @@ export async function runAgyWithFailover(options: RunAgyFailoverOptions): Promis
       if (lastResult.exitCode === 0) {
         if (capturedAliases.has(current.alias)) {
           try {
-            captureAgySession(paths, current, options.agyDeps);
+            captureAgySession(paths, current, {
+              ...options.agyDeps,
+              encrypt: options.agyDeps?.encrypt ?? (process.platform === 'darwin' || Boolean(options.agyDeps?.securityRun)),
+            });
           } catch {
             // Non-fatal if keychain unchanged or locked.
           }

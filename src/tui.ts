@@ -25,8 +25,12 @@ import { isAccountChromeRunning } from './chrome.ts';
 import {
   DEFAULT_HOST,
   VALID_PLAN_TIERS,
+  readDaemonToken,
+  resolvePaths,
   validateAlias,
+  validateChromeProfileName,
   validateEmail,
+  writeFileRestricted,
   type PoolPaths,
 } from './config.ts';
 import { PoolDB } from './db.ts';
@@ -1048,8 +1052,17 @@ async function isDaemonAlive(port: number): Promise<boolean> {
   }
 }
 
-async function callDaemon<T>(port: number, route: string, init: RequestInit = {}): Promise<T> {
-  const headers: Record<string, string> = { ...(init.headers as Record<string, string> | undefined) };
+async function callDaemon<T>(
+  port: number,
+  route: string,
+  init: RequestInit = {},
+  paths: PoolPaths = resolvePaths(),
+): Promise<T> {
+  const token = readDaemonToken(paths);
+  const headers: Record<string, string> = {
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    ...(init.headers as Record<string, string> | undefined),
+  };
   if (init.body !== undefined) {
     headers['Content-Type'] = 'application/json';
   }
@@ -1086,9 +1099,9 @@ async function fetchSnapshot(paths: PoolPaths, port: number): Promise<TuiSnapsho
         keepalive: TuiSnapshot['keepalive'];
         settings?: DaemonSettings;
         agyStatus?: TuiAgySummary | null;
-      }>(port, '/api/accounts'),
-      callDaemon<{ events: PoolEvent[] }>(port, '/api/events?limit=40'),
-      callDaemon<{ settings: DaemonSettings }>(port, '/api/settings'),
+      }>(port, '/api/accounts', {}, paths),
+      callDaemon<{ events: PoolEvent[] }>(port, '/api/events?limit=40', {}, paths),
+      callDaemon<{ settings: DaemonSettings }>(port, '/api/settings', {}, paths),
     ]);
     let agyStatus = accData.agyStatus ?? null;
     if (!agyStatus) {
@@ -1186,10 +1199,15 @@ async function runBulkImportLocalOrDaemon(
   port: number,
 ): Promise<BulkImportResult> {
   if (await isDaemonAlive(port)) {
-    return await callDaemon<BulkImportResult>(port, '/api/import/chrome', {
-      method: 'POST',
-      body: JSON.stringify(payload),
-    });
+    return await callDaemon<BulkImportResult>(
+      port,
+      '/api/import/chrome',
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+      paths,
+    );
   }
   const db = new PoolDB(paths);
   try {
@@ -1230,7 +1248,14 @@ async function runBulkImportLocalOrDaemon(
         alias = generateUniqueAlias(email, existingAliases);
       }
       const userDataDir = (item.chrome_user_data_dir ?? payload.chrome_user_data_dir ?? defaultUserDataDir).trim();
-      const profileName = (item.chrome_profile_name ?? payload.chrome_profile_name ?? 'Default').trim() || 'Default';
+      const rawProfileName = (item.chrome_profile_name ?? payload.chrome_profile_name ?? 'Default').trim() || 'Default';
+      let profileName: string;
+      try {
+        profileName = validateChromeProfileName(rawProfileName);
+      } catch (err) {
+        errors.push({ email, error: err instanceof Error ? err.message : String(err) });
+        continue;
+      }
       let hasCookies = false;
       if (typeof item.has_cookies === 'boolean') {
         hasCookies = item.has_cookies;
@@ -1492,7 +1517,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
         try {
           const acc = db.getAccount(alias);
           if (!acc) throw new Error(`Không tìm thấy "${alias}".`);
-          res = captureAgySession(paths, acc);
+          res = captureAgySession(paths, acc, { encrypt: process.platform === 'darwin' });
           db.addEvent(acc.id, acc.alias, 'agy_session_captured', `Đã lưu phiên đăng nhập agy của ${acc.alias}`);
         } finally {
           db.close();
@@ -2006,8 +2031,10 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           if (!(await isDaemonAlive(port))) {
             await options.runCliSubcommand(['daemon', 'start', '--port', String(port)]);
           }
-          openExternalUrl(`http://${DEFAULT_HOST}:${port}`);
-          setNotice(`Đã mở Web Dashboard tại http://${DEFAULT_HOST}:${port}`, 'success');
+          const baseUrl = `http://${DEFAULT_HOST}:${port}`;
+          const token = readDaemonToken(paths);
+          openExternalUrl(token ? `${baseUrl}/auth?token=${encodeURIComponent(token)}` : baseUrl);
+          setNotice(`Đã mở Web Dashboard tại ${baseUrl}`, 'success');
         });
       } else if (chosen.id === 'daemon-start') {
         await runAction('Đang khởi động daemon nền...', async () => {
@@ -2141,7 +2168,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
                 db.close();
               }
             })();
-        fs.writeFileSync(value, JSON.stringify(payload, null, 2), 'utf8');
+        writeFileRestricted(value, JSON.stringify(payload, null, 2));
         setNotice(`Đã xuất metadata ra ${path.resolve(value)}`, 'success');
       });
     }

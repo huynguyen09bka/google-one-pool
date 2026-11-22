@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import http, { type IncomingMessage, type ServerResponse } from 'node:http';
 import path from 'node:path';
@@ -25,7 +26,16 @@ import {
 } from './agysession.ts';
 import { computePoolAnalytics } from './analytics.ts';
 import { isAccountChromeRunning } from './chrome.ts';
-import { DEFAULT_HOST, DEFAULT_PORT, validateAlias, validateEmail, type PoolPaths } from './config.ts';
+import {
+  DEFAULT_HOST,
+  DEFAULT_PORT,
+  ensureDaemonToken,
+  tokensEqual,
+  validateAlias,
+  validateChromeProfileName,
+  validateEmail,
+  type PoolPaths,
+} from './config.ts';
 import type { PoolDB } from './db.ts';
 import type { KeepAliveScheduler } from './keepalive.ts';
 import type { PoolSwitcher } from './switcher.ts';
@@ -52,17 +62,29 @@ export interface CreateDaemonServerOptions {
   port?: number;
   webDir?: string;
   discoverRoots?: BrowserScanRoot[];
+  authToken?: string;
 }
 
 export interface DaemonServerHandle {
   server: http.Server;
   host: string;
   port: number;
+  authToken: string;
   start: () => Promise<number>;
   stop: () => Promise<void>;
   broadcast: (event: string, data: unknown) => void;
   broadcastSnapshot: () => void;
 }
+
+const SESSION_COOKIE_NAME = 'gpool_session';
+
+const SECURITY_HEADERS: Record<string, string> = {
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Referrer-Policy': 'no-referrer',
+  'Content-Security-Policy':
+    "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+};
 
 class HttpError extends Error {
   readonly statusCode: number;
@@ -92,6 +114,11 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
   const host = options.host ?? DEFAULT_HOST;
   const requestedPort = options.port ?? DEFAULT_PORT;
   const webDir = options.webDir ?? path.resolve(import.meta.dirname, '..', 'web');
+  const authToken = options.authToken ?? ensureDaemonToken(options.paths);
+  const expectedSessionCookie = crypto
+    .createHmac('sha256', authToken)
+    .update('gpool-web-session:v1')
+    .digest('hex');
   const sseClients = new Set<ServerResponse>();
   let actualPort = requestedPort;
   let heartbeatTimer: NodeJS.Timeout | null = null;
@@ -183,17 +210,53 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
     broadcast('state_changed', buildSnapshot());
   }
 
+  function isRequestAuthenticated(req: IncomingMessage): boolean {
+    const authHeader = req.headers.authorization;
+    if (typeof authHeader === 'string' && authHeader.toLowerCase().startsWith('bearer ')) {
+      const provided = authHeader.slice(7).trim();
+      if (provided && tokensEqual(provided, authToken)) {
+        return true;
+      }
+    }
+    const cookieHeader = req.headers.cookie;
+    if (typeof cookieHeader === 'string') {
+      const sessionCookie = parseCookieValue(cookieHeader, SESSION_COOKIE_NAME);
+      if (sessionCookie && tokensEqual(sessionCookie, expectedSessionCookie)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  function requireAuthenticated(req: IncomingMessage): void {
+    if (!isRequestAuthenticated(req)) {
+      throw new HttpError(
+        401,
+        'Yêu cầu xác thực daemon token (Authorization: Bearer <token> hoặc mở bằng "gpool dashboard").',
+      );
+    }
+  }
+
   function validateLoopbackRequest(req: IncomingMessage): void {
     const hostHeader = req.headers.host;
-    if (hostHeader) {
-      const hostname = extractHostname(hostHeader);
-      if (hostname !== '127.0.0.1' && hostname !== 'localhost') {
-        throw new HttpError(403, 'Host header không hợp lệ — chỉ chấp nhận localhost hoặc 127.0.0.1.');
-      }
+    if (!hostHeader) {
+      throw new HttpError(403, 'Thiếu Host header — chỉ chấp nhận localhost hoặc 127.0.0.1.');
+    }
+    const hostname = extractHostname(hostHeader);
+    if (hostname !== '127.0.0.1' && hostname !== 'localhost') {
+      throw new HttpError(403, 'Host header không hợp lệ — chỉ chấp nhận localhost hoặc 127.0.0.1.');
     }
 
     const method = (req.method ?? 'GET').toUpperCase();
     if (method !== 'GET' && method !== 'HEAD') {
+      const secFetchSite = req.headers['sec-fetch-site'];
+      if (typeof secFetchSite === 'string') {
+        const normalizedSite = secFetchSite.trim().toLowerCase();
+        if (normalizedSite && normalizedSite !== 'same-origin' && normalizedSite !== 'none') {
+          throw new HttpError(403, 'Từ chối yêu cầu cross-site tới Google One Pool daemon.');
+        }
+      }
+
       const origin = req.headers.origin;
       if (origin !== undefined) {
         let parsed: URL;
@@ -227,10 +290,26 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
         const svg =
           '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#4f8cff"/><stop offset="100%" stop-color="#a78bfa"/></linearGradient></defs><rect width="64" height="64" rx="16" fill="url(#g)"/><text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#fff" font-family="system-ui,sans-serif" font-weight="800" font-size="22">G1P</text></svg>';
         res.writeHead(200, {
+          ...SECURITY_HEADERS,
           'Content-Type': 'image/svg+xml; charset=utf-8',
           'Cache-Control': 'public, max-age=86400',
         });
         res.end(svg);
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/auth') {
+        const tokenParam = url.searchParams.get('token')?.trim() ?? '';
+        if (!tokenParam || !tokensEqual(tokenParam, authToken)) {
+          throw new HttpError(401, 'Daemon token không hợp lệ.');
+        }
+        res.writeHead(302, {
+          ...SECURITY_HEADERS,
+          Location: '/',
+          'Cache-Control': 'no-store',
+          'Set-Cookie': `${SESSION_COOKIE_NAME}=${expectedSessionCookie}; HttpOnly; SameSite=Strict; Path=/`,
+        });
+        res.end();
         return;
       }
 
@@ -240,18 +319,43 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
       }
 
       if (method === 'GET' && pathname === '/api/health') {
-        sendJson(res, 200, {
-          ok: true,
-          pid: process.pid,
-          port: actualPort,
-          homeDir: options.paths.homeDir,
-          keepalive: options.keepalive.getStatus(),
-        });
+        if (isRequestAuthenticated(req)) {
+          sendJson(res, 200, {
+            ok: true,
+            pid: process.pid,
+            port: actualPort,
+            homeDir: options.paths.homeDir,
+            keepalive: options.keepalive.getStatus(),
+          });
+        } else {
+          sendJson(res, 200, { ok: true });
+        }
         return;
+      }
+
+      if (method === 'POST' && pathname === '/api/auth/session') {
+        const body = await readJsonBody<{ token?: string }>(req);
+        const provided = typeof body.token === 'string' ? body.token.trim() : '';
+        if (!provided || !tokensEqual(provided, authToken)) {
+          throw new HttpError(401, 'Daemon token không hợp lệ.');
+        }
+        res.writeHead(200, {
+          ...SECURITY_HEADERS,
+          'Content-Type': 'application/json; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Set-Cookie': `${SESSION_COOKIE_NAME}=${expectedSessionCookie}; HttpOnly; SameSite=Strict; Path=/`,
+        });
+        res.end(JSON.stringify({ ok: true }));
+        return;
+      }
+
+      if (pathname.startsWith('/api/')) {
+        requireAuthenticated(req);
       }
 
       if (method === 'GET' && pathname === '/api/events/stream') {
         res.writeHead(200, {
+          ...SECURITY_HEADERS,
           'Content-Type': 'text/event-stream; charset=utf-8',
           'Cache-Control': 'no-cache, no-transform',
           Connection: 'keep-alive',
@@ -400,7 +504,17 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
           }
 
           const userDataDir = (item.chrome_user_data_dir ?? body.chrome_user_data_dir ?? defaultUserDataDir).trim();
-          const profileName = (item.chrome_profile_name ?? body.chrome_profile_name ?? 'Default').trim() || 'Default';
+          const rawProfileName = (item.chrome_profile_name ?? body.chrome_profile_name ?? 'Default').trim() || 'Default';
+          let profileName: string;
+          try {
+            profileName = validateChromeProfileName(rawProfileName);
+          } catch (err) {
+            errors.push({
+              email: normalizedEmail,
+              error: err instanceof Error ? err.message : String(err),
+            });
+            continue;
+          }
           let hasCookies = false;
           if (typeof item.has_cookies === 'boolean') {
             hasCookies = item.has_cookies;
@@ -566,7 +680,7 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
         const body = await readJsonBody<{ passphrase?: string; withSessions?: boolean }>(req);
         try {
           const withSessions = Boolean(body.withSessions);
-          const metadata = options.db.exportMetadata();
+          const metadata = options.db.exportMetadata({ includeSensitiveProxyCredentials: true });
           const sessions = withSessions ? exportDecryptedSessions(options.paths) : [];
           const bundle = encryptBackupBundle({ metadata, agy_sessions: sessions }, body.passphrase ?? '', withSessions);
           sendJson(res, 200, { ok: true, bundle, sessions_count: sessions.length });
@@ -652,7 +766,12 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
 
       const accountMatch = /^\/api\/accounts\/([^/]+)(?:\/(switch|open|oauth|check|cooldown|isolate|confirm-login|login|agy-capture|agy-activate))?$/.exec(pathname);
       if (accountMatch) {
-        const aliasParam = decodeURIComponent(accountMatch[1]);
+        let aliasParam: string;
+        try {
+          aliasParam = decodeURIComponent(accountMatch[1]);
+        } catch {
+          throw new HttpError(400, 'Alias trên URL không hợp lệ.');
+        }
         const action = accountMatch[2] ?? '';
 
         if (!action && method === 'GET') {
@@ -900,6 +1019,7 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
     get port() {
       return actualPort;
     },
+    authToken,
     broadcast,
     broadcastSnapshot,
     start: () =>
@@ -954,6 +1074,7 @@ function serveStaticFile(webDir: string, filename: string, res: ServerResponse):
   const contentType = MIME_TYPES[ext] ?? 'application/octet-stream';
   const content = fs.readFileSync(filePath);
   res.writeHead(200, {
+    ...SECURITY_HEADERS,
     'Content-Type': contentType,
     'Cache-Control': 'no-cache',
   });
@@ -963,6 +1084,7 @@ function serveStaticFile(webDir: string, filename: string, res: ServerResponse):
 function sendJson(res: ServerResponse, statusCode: number, data: unknown): void {
   const json = JSON.stringify(data);
   res.writeHead(statusCode, {
+    ...SECURITY_HEADERS,
     'Content-Type': 'application/json; charset=utf-8',
     'Cache-Control': 'no-store',
   });
@@ -970,6 +1092,12 @@ function sendJson(res: ServerResponse, statusCode: number, data: unknown): void 
 }
 
 async function readJsonBody<T>(req: IncomingMessage, allowEmpty = false): Promise<T> {
+  const rawContentType = req.headers['content-type'];
+  const contentType = typeof rawContentType === 'string' ? rawContentType.split(';')[0].trim().toLowerCase() : '';
+  if (contentType && contentType !== 'application/json') {
+    throw new HttpError(415, 'Content-Type phải là application/json.');
+  }
+
   const chunks: Buffer[] = [];
   let totalBytes = 0;
   const maxBytes = 1_048_576;
@@ -989,11 +1117,27 @@ async function readJsonBody<T>(req: IncomingMessage, allowEmpty = false): Promis
     throw new HttpError(400, 'Body JSON không được để trống.');
   }
 
+  if (contentType !== 'application/json') {
+    throw new HttpError(415, 'Content-Type phải là application/json.');
+  }
+
   try {
     return JSON.parse(raw) as T;
   } catch {
     throw new HttpError(400, 'Body JSON không hợp lệ.');
   }
+}
+
+function parseCookieValue(cookieHeader: string, name: string): string | null {
+  for (const part of cookieHeader.split(';')) {
+    const eqIdx = part.indexOf('=');
+    if (eqIdx === -1) continue;
+    const key = part.slice(0, eqIdx).trim();
+    if (key === name) {
+      return part.slice(eqIdx + 1).trim();
+    }
+  }
+  return null;
 }
 
 function extractHostname(hostHeader: string): string {
