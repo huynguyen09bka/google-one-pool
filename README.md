@@ -95,9 +95,12 @@ node bin/gpool.ts launchagent install
 **Đổi acc hàng ngày** (không cần OAuth lại, không cần `/logout`):
 
 ```bash
-gpool agy-activate <alias>      # đổi phiên agy sang acc khác
-gpool run <alias> -- agy        # hoặc chạy thẳng: tự nạp phiên rồi mở agy
-gpool agy-status                # xem phiên đang nạp là của acc nào
+gpool agy                       # Chạy agy có khóa agy.lock + tự chọn acc sẵn sàng
+gpool agy --bucket auto -- -p "Tác vụ..."  # Tự bắt lỗi quota, đặt cooldown & failover xoay acc
+gpool agy-next                  # Đổi acc agy kế tiếp + nạp thẳng Keychain trong 1 lệnh
+gpool agy-activate <alias>      # Nạp phiên agy của 1 acc cụ thể
+gpool agy-health                # Kiểm tra sức khỏe snapshot agy + cảnh báo ngày gia hạn
+gpool mcp                       # Chạy MCP Server (stdio) cho AI Agents (Devin/Claude/Codex/Cursor)
 ```
 
 Cơ chế & an toàn:

@@ -3,7 +3,9 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { readAgyLease } from './agylock.ts';
 import type { PoolPaths } from './config.ts';
+import type { AccountRecord, AgyHealthEntry, AgyHealthReport, RenewalAlert } from './types.ts';
 
 /**
  * agy CLI session swapper.
@@ -657,6 +659,199 @@ export function liveBlobSha(paths: PoolPaths, deps?: AgySessionDeps): string | n
 
 export function readMarkerAlias(paths: PoolPaths): string | null {
   return readMarker(paths)?.alias ?? null;
+}
+
+/**
+ * Returns the set of aliases that have a valid stored agy session snapshot.
+ */
+export function listCapturedAliases(paths: PoolPaths): Set<string> {
+  return new Set(listSessionMetas(paths).keys());
+}
+
+interface ParsedBlobMetadata {
+  valid: boolean;
+  detected_email: string | null;
+  has_refresh_token: boolean;
+  has_access_token: boolean;
+  token_expiry: string | null;
+  auth_method: string | null;
+}
+
+function inspectBlobMetadata(blob: Buffer): ParsedBlobMetadata {
+  const text = blob.toString('utf8').trim();
+  if (!text) {
+    return {
+      valid: false,
+      detected_email: null,
+      has_refresh_token: false,
+      has_access_token: false,
+      token_expiry: null,
+      auth_method: null,
+    };
+  }
+
+  let jsonText = text;
+  if (text.startsWith('go-keyring-base64:')) {
+    try {
+      jsonText = Buffer.from(text.slice('go-keyring-base64:'.length).trim(), 'base64').toString('utf8');
+    } catch {
+      return {
+        valid: false,
+        detected_email: null,
+        has_refresh_token: false,
+        has_access_token: false,
+        token_expiry: null,
+        auth_method: null,
+      };
+    }
+  }
+
+  try {
+    const parsed = JSON.parse(jsonText) as Record<string, unknown>;
+    const tokenObj =
+      parsed.token && typeof parsed.token === 'object' ? (parsed.token as Record<string, unknown>) : parsed;
+    const access = typeof tokenObj.access_token === 'string' && tokenObj.access_token.trim().length > 0;
+    const refresh = typeof tokenObj.refresh_token === 'string' && tokenObj.refresh_token.trim().length > 0;
+    const expiry = typeof tokenObj.expiry === 'string' && tokenObj.expiry.trim() ? tokenObj.expiry.trim() : null;
+    const authMethod =
+      typeof parsed.auth_method === 'string' && parsed.auth_method.trim() ? parsed.auth_method.trim() : null;
+    const email = detectEmailInBlob(blob);
+    return {
+      valid: access || refresh,
+      detected_email: email,
+      has_refresh_token: refresh,
+      has_access_token: access,
+      token_expiry: expiry,
+      auth_method: authMethod,
+    };
+  } catch {
+    // Non-JSON opaque credential blob (still treat as valid if non-empty)
+    return {
+      valid: text.length > 8,
+      detected_email: detectEmailInBlob(blob),
+      has_refresh_token: text.includes('refresh_token'),
+      has_access_token: text.length > 8,
+      token_expiry: null,
+      auth_method: null,
+    };
+  }
+}
+
+/**
+ * Inspects health of all accounts' stored `agy` session snapshots without exposing
+ * secret values, combined with active Keychain owner, lease status, and renewal alerts.
+ */
+export function inspectAgyHealth(
+  paths: PoolPaths,
+  accounts: AccountRecord[],
+  renewalAlerts: RenewalAlert[] = [],
+  deps?: AgySessionDeps,
+): AgyHealthReport {
+  let ctx: LiveKeychainContext | null = null;
+  let runningClients: string[] = [];
+  try {
+    ctx = getLiveKeychainContext(paths, deps);
+    runningClients = listRunningAgyClients(deps);
+  } catch {
+    ctx = null;
+    runningClients = [];
+  }
+
+  const nowMs = Date.now();
+  const entries: AgyHealthEntry[] = [];
+
+  for (const acc of accounts) {
+    const snap = loadSnapshot(paths, acc.alias);
+    if (!snap) {
+      entries.push({
+        alias: acc.alias,
+        email: acc.email,
+        plan_tier: acc.plan_tier,
+        captured: false,
+        captured_at: null,
+        detected_email: null,
+        email_matches: false,
+        has_refresh_token: false,
+        token_expiry: null,
+        access_token_expired: null,
+        auth_method: null,
+        health: 'missing_snapshot',
+        detail: `Chưa lưu phiên agy — đăng nhập agy rồi chạy "gpool agy-capture ${acc.alias}"`,
+        is_live: false,
+      });
+      continue;
+    }
+
+    let blob: Buffer;
+    try {
+      blob = Buffer.from(snap.keychain_blob_b64, 'base64');
+    } catch {
+      blob = Buffer.alloc(0);
+    }
+
+    const meta = inspectBlobMetadata(blob);
+    const detectedEmail = meta.detected_email ?? snap.detected_email;
+    const emailMatches = !detectedEmail || detectedEmail.toLowerCase() === acc.email.toLowerCase();
+    const expiryMs = meta.token_expiry ? Date.parse(meta.token_expiry) : NaN;
+    const accessExpired = Number.isNaN(expiryMs) ? null : expiryMs <= nowMs;
+    const isLive = Boolean(ctx?.present && ctx.live_owner_alias === acc.alias);
+
+    let health: AgyHealthEntry['health'];
+    let detail: string;
+    if (!meta.valid) {
+      health = 'corrupt';
+      detail = 'Snapshot không hợp lệ hoặc thiếu token — hãy đăng nhập agy và capture lại.';
+    } else if (!emailMatches) {
+      health = 'email_mismatch';
+      detail = `Email trong snapshot (${detectedEmail}) không khớp tài khoản (${acc.email}).`;
+    } else if (accessExpired && !meta.has_refresh_token) {
+      health = 'corrupt';
+      detail = 'Access token đã hết hạn và không có refresh_token — cần login lại.';
+    } else if (accessExpired) {
+      health = 'needs_refresh';
+      detail = 'Access token đã hết hạn nhưng có refresh_token (agy sẽ tự làm mới khi chạy).';
+    } else {
+      health = 'healthy';
+      detail = meta.has_refresh_token
+        ? 'Snapshot khỏe mạnh (có refresh_token & access_token còn hạn).'
+        : 'Snapshot hợp lệ.';
+    }
+
+    entries.push({
+      alias: acc.alias,
+      email: acc.email,
+      plan_tier: acc.plan_tier,
+      captured: true,
+      captured_at: snap.captured_at,
+      detected_email: detectedEmail,
+      email_matches: emailMatches,
+      has_refresh_token: meta.has_refresh_token,
+      token_expiry: meta.token_expiry,
+      access_token_expired: accessExpired,
+      auth_method: meta.auth_method,
+      health,
+      detail,
+      is_live: isLive,
+    });
+  }
+
+  return {
+    checked_at: new Date(nowMs).toISOString(),
+    keychain_present: ctx?.present ?? false,
+    live_owner_alias: ctx?.live_owner_alias ?? null,
+    running_clients: runningClients,
+    lease: readAgyLease(paths),
+    summary: {
+      total: entries.length,
+      healthy: entries.filter((e) => e.health === 'healthy').length,
+      needs_refresh: entries.filter((e) => e.health === 'needs_refresh').length,
+      missing_snapshot: entries.filter((e) => e.health === 'missing_snapshot').length,
+      issues: entries.filter((e) => e.health === 'corrupt' || e.health === 'email_mismatch').length,
+      renewal_alerts: renewalAlerts.length,
+    },
+    accounts: entries,
+    renewal_alerts: renewalAlerts,
+  };
 }
 
 /**

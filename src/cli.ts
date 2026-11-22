@@ -2,12 +2,15 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
+import { readAgyLease, releaseAgyLease } from './agylock.ts';
+import { runAgyWithFailover } from './agy-runner.ts';
 import {
   activateAgySession,
   captureAgySession,
   getAgySessionStatus,
   getLiveKeychainContext,
   hasSessionSnapshot,
+  inspectAgyHealth,
   sessionInfoForAlias,
   type AgyActivateResult,
   type AgyCaptureResult,
@@ -26,22 +29,27 @@ import {
   resolvePort,
   validateAlias,
   validateEmail,
+  validateRotationPolicy,
   type PoolPaths,
 } from './config.ts';
 import { PoolDB } from './db.ts';
 import { KeepAliveScheduler } from './keepalive.ts';
 import { getLaunchAgentStatus, installLaunchAgent, uninstallLaunchAgent } from './launchagent.ts';
+import { runMcpServer } from './mcp.ts';
 import { createDaemonServer } from './server.ts';
 import { PoolSwitcher } from './switcher.ts';
 import { runTui } from './tui.ts';
 import type {
   AccountView,
+  AgyHealthReport,
+  AgyLeaseInfo,
   BulkImportItemInput,
   BulkImportResult,
   EffectiveState,
   PlanTier,
   PoolExportPayload,
   ProfileMode,
+  RotationPolicy,
 } from './types.ts';
 
 interface ParsedArgs {
@@ -151,6 +159,12 @@ export async function runCli(argv: string[]): Promise<number> {
       case 'import-clipboard':
         return await handleImportClipboard(parsed.flags, paths, port, asJson);
 
+      case 'agy':
+        return await handleAgyWrapper(rest, parsed.passthrough, parsed.flags, paths, port, asJson);
+
+      case 'agy-next':
+        return await handleAgyNext(parsed.flags, paths, port, asJson);
+
       case 'agy-capture':
         return await handleAgyCapture(rest, paths, port, asJson);
 
@@ -159,6 +173,15 @@ export async function runCli(argv: string[]): Promise<number> {
 
       case 'agy-status':
         return await handleAgyStatus(paths, port, asJson);
+
+      case 'agy-health':
+        return await handleAgyHealth(paths, port, asJson);
+
+      case 'agy-lock':
+        return await handleAgyLock(rest, paths, port, asJson);
+
+      case 'mcp':
+        return await runMcpServer({ paths, port });
 
       case 'run':
         return await handleRun(rest, parsed.passthrough, parsed.flags, paths);
@@ -341,6 +364,12 @@ async function handleShow(args: string[], paths: PoolPaths, port: number, asJson
     if (account.tags.length) console.log(`Tags:           ${account.tags.join(', ')}`);
     if (account.proxy_url) console.log(`Proxy:          ${account.proxy_url}`);
     if (account.cooldown_remaining_ms > 0) console.log(`Cooldown còn:   ${formatShortMs(account.cooldown_remaining_ms)}`);
+    if (account.bucket_cooldowns && account.bucket_cooldowns.length > 0) {
+      const bList = account.bucket_cooldowns
+        .map((b) => `${b.bucket}:${formatShortMs(b.remaining_ms)}`)
+        .join(', ');
+      console.log(`Cooldown nhóm:  ${bList}`);
+    }
     if (account.notes) console.log(`Ghi chú:        ${account.notes}`);
     let agyInfo = account.agy_session;
     if (agyInfo === undefined) {
@@ -641,19 +670,34 @@ async function handleNext(
   asJson: boolean,
 ): Promise<number> {
   const cooldownRaw = getStrFlag(flags, 'cooldown');
+  const activateAgy = Boolean(flags.get('agy'));
+  const explicitOpen = Boolean(flags.get('open'));
+  const noOpen = Boolean(flags.get('no-open'));
+  const openChrome = noOpen ? false : explicitOpen ? true : !activateAgy;
+  const policyRaw = getStrFlag(flags, 'policy');
+  const waitRaw = getStrFlag(flags, 'wait');
+
   const payload = {
     cooldownHours: cooldownRaw !== undefined ? Number(cooldownRaw) : undefined,
     reason: getStrFlag(flags, 'reason'),
     tag: getStrFlag(flags, 'tag'),
-    openChrome: !Boolean(flags.get('no-open')),
+    bucket: getStrFlag(flags, 'bucket'),
+    policy: policyRaw ? validateRotationPolicy(policyRaw) : undefined,
+    activateAgy,
+    requireAgy: activateAgy,
+    forceAgy: Boolean(flags.get('force')),
+    waitLockSeconds: waitRaw ? Number(waitRaw) : undefined,
+    openChrome,
   };
 
   let res;
   if (await isDaemonAlive(port)) {
-    res = await callDaemon(port, '/api/pool/next', {
+    const httpRes = await fetch(`http://${DEFAULT_HOST}:${port}/api/pool/next`, {
       method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
+    res = await httpRes.json().catch(() => ({ ok: false, error: `HTTP ${httpRes.status}` }));
   } else {
     const db = new PoolDB(paths);
     try {
@@ -669,7 +713,16 @@ async function handleNext(
     return (res as { ok: boolean }).ok ? 0 : 1;
   }
 
-  const r = res as { ok: boolean; active?: AccountView; error?: string; agyGuide?: string; nextAvailableAt?: string | null };
+  const r = res as {
+    ok: boolean;
+    active?: AccountView;
+    error?: string;
+    agyGuide?: string;
+    agyActivated?: boolean;
+    recapturedAlias?: string | null;
+    bucket?: string;
+    nextAvailableAt?: string | null;
+  };
   if (!r.ok) {
     console.error(r.error);
     if (r.nextAvailableAt) {
@@ -677,9 +730,180 @@ async function handleNext(
     }
     return 1;
   }
-  console.log(`Đã xoay vòng sang "${r.active!.alias}" (${r.active!.email}).`);
-  if (r.agyGuide) console.log(r.agyGuide);
+  const bucketSuffix = r.bucket && r.bucket !== 'all' ? ` [bucket: ${r.bucket}]` : '';
+  console.log(`Đã xoay vòng sang "${r.active!.alias}" (${r.active!.email})${bucketSuffix}.`);
+  if (r.agyActivated) {
+    console.log(
+      `Đã nạp luôn phiên agy của "${r.active!.alias}" vào Keychain` +
+        (r.recapturedAlias ? ` (đã cập nhật snapshot "${r.recapturedAlias}")` : '') +
+        ' — mở lại agy là chạy đúng acc.',
+    );
+  } else if (r.agyGuide) {
+    console.log(r.agyGuide);
+  }
   return 0;
+}
+
+async function handleAgyNext(
+  flags: Map<string, string | boolean>,
+  paths: PoolPaths,
+  port: number,
+  asJson: boolean,
+): Promise<number> {
+  const merged = new Map(flags);
+  merged.set('agy', true);
+  if (!merged.has('open')) merged.set('no-open', true);
+  return await handleNext(merged, paths, port, asJson);
+}
+
+async function handleAgyWrapper(
+  args: string[],
+  passthrough: string[],
+  flags: Map<string, string | boolean>,
+  paths: PoolPaths,
+  port: number,
+  asJson: boolean,
+): Promise<number> {
+  const agyArgs = passthrough.length > 0 ? passthrough : args;
+  const maxRetriesRaw = getStrFlag(flags, 'max-retries');
+  const cooldownRaw = getStrFlag(flags, 'cooldown');
+  const waitRaw = getStrFlag(flags, 'wait');
+  const timeoutRaw = getStrFlag(flags, 'timeout');
+  const policyRaw = getStrFlag(flags, 'policy');
+  const forceAutoRotate = Boolean(flags.get('auto-rotate'));
+  const explicitInteractive = Boolean(flags.get('interactive'));
+
+  const isInteractive =
+    explicitInteractive ||
+    (!forceAutoRotate && !asJson && agyArgs.length === 0 && Boolean(process.stdin.isTTY && process.stdout.isTTY));
+
+  const db = new PoolDB(paths);
+  let result;
+  try {
+    result = await runAgyWithFailover({
+      db,
+      paths,
+      agyArgs,
+      alias: getStrFlag(flags, 'alias'),
+      tag: getStrFlag(flags, 'tag'),
+      bucket: getStrFlag(flags, 'bucket') ?? 'all',
+      policy: policyRaw ? (validateRotationPolicy(policyRaw) as RotationPolicy) : undefined,
+      cooldownHoursOverride: cooldownRaw ? Number(cooldownRaw) : undefined,
+      maxRetries: maxRetriesRaw ? Number(maxRetriesRaw) : 3,
+      waitSeconds: waitRaw ? Number(waitRaw) : 0,
+      timeoutSeconds: timeoutRaw ? Number(timeoutRaw) : undefined,
+      forceAgy: Boolean(flags.get('force')),
+      interactive: isInteractive,
+      mirrorStdio: !asJson,
+      holder: 'gpool-agy',
+      onStatus: asJson ? undefined : (msg) => console.error(msg),
+    });
+  } finally {
+    db.close();
+  }
+
+  // Best-effort sync running daemon so Web Dashboard updates live
+  if (await isDaemonAlive(port)) {
+    await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, { method: 'POST' }).catch(() => {});
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(result, null, 2));
+  } else if (!result.ok && result.error) {
+    console.error(`Lỗi: ${result.error}`);
+    if (result.nextAvailableAt) {
+      console.error(`Tài khoản sớm nhất hết cooldown lúc: ${result.nextAvailableAt}`);
+    }
+  }
+  return result.exitCode;
+}
+
+async function handleAgyHealth(paths: PoolPaths, port: number, asJson: boolean): Promise<number> {
+  let report: AgyHealthReport;
+  if (await isDaemonAlive(port)) {
+    report = await callDaemon<AgyHealthReport>(port, '/api/agy/health');
+  } else {
+    const db = new PoolDB(paths);
+    try {
+      db.expireElapsedCooldowns();
+      const settings = db.getSettings();
+      const alerts = db.getRenewalAlerts(settings.renewal_alert_days);
+      report = inspectAgyHealth(paths, db.listAccounts(), alerts);
+    } finally {
+      db.close();
+    }
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify({ ok: true, ...report }, null, 2));
+    return report.summary.issues > 0 ? 1 : 0;
+  }
+
+  console.log(
+    `Sức khỏe phiên agy: ${report.summary.healthy} khỏe mạnh • ${report.summary.needs_refresh} chờ refresh • ` +
+      `${report.summary.missing_snapshot} chưa lưu • ${report.summary.issues} lỗi`,
+  );
+  console.log(
+    `Keychain hiện tại: ${report.live_owner_alias ?? (report.keychain_present ? 'có phiên (chưa khớp pool)' : 'trống')}` +
+      (report.running_clients.length > 0 ? ` • Đang chạy: ${report.running_clients.join(', ')}` : ''),
+  );
+  if (report.lease) {
+    console.log(
+      `Khóa agy.lock: ${report.lease.stale ? 'STALE (đã cũ)' : 'ĐANG GIỮ'} — holder=${report.lease.holder}, acc=${report.lease.alias}, PID=${report.lease.pid}`,
+    );
+  }
+  if (report.accounts.length > 0) {
+    console.log(`\n  ${pad('ALIAS', 18)} ${pad('SỨC KHỎE', 18)} ${pad('REFRESH', 9)} ${pad('HẠN TOKEN', 22)} GHI CHÚ`);
+    for (const acc of report.accounts) {
+      const liveMark = acc.is_live ? '*' : ' ';
+      const exp = acc.token_expiry ? acc.token_expiry.slice(0, 19).replace('T', ' ') : '-';
+      const rt = acc.captured ? (acc.has_refresh_token ? 'có' : 'không') : '-';
+      console.log(
+        `${liveMark} ${pad(acc.alias, 18)} ${pad(acc.health, 18)} ${pad(rt, 9)} ${pad(exp, 22)} ${acc.detail}`,
+      );
+    }
+  }
+  if (report.renewal_alerts.length > 0) {
+    console.log('\nCảnh báo ngày gia hạn gói:');
+    for (const alert of report.renewal_alerts) {
+      const when = alert.days_left <= 0 ? `QUÁ HẠN (${alert.days_left} ngày)` : `còn ${alert.days_left} ngày`;
+      console.log(`  ! ${alert.alias} (${alert.plan_tier}) — gia hạn ${alert.renewal_date} (${when})`);
+    }
+  }
+  return report.summary.issues > 0 ? 1 : 0;
+}
+
+async function handleAgyLock(args: string[], paths: PoolPaths, port: number, asJson: boolean): Promise<number> {
+  const sub = (args[0] ?? 'status').toLowerCase();
+  if (sub === 'status') {
+    const lease: AgyLeaseInfo | null = (await isDaemonAlive(port))
+      ? (await callDaemon<{ lease: AgyLeaseInfo | null }>(port, '/api/agy/lease')).lease
+      : readAgyLease(paths);
+    if (asJson) {
+      console.log(JSON.stringify({ ok: true, lease }, null, 2));
+    } else if (!lease) {
+      console.log('Không có tiến trình nào đang giữ khóa agy.lock (sẵn sàng).');
+    } else {
+      console.log(
+        `agy.lock: ${lease.stale ? 'STALE (có thể tự thu hồi)' : 'ĐANG KHÓA'} — holder="${lease.holder}", acc="${lease.alias}", PID=${lease.pid}, hết hạn=${lease.expires_at}`,
+      );
+    }
+    return 0;
+  }
+
+  if (sub === 'unlock' || sub === 'release' || sub === 'clear') {
+    const released = (await isDaemonAlive(port))
+      ? (await callDaemon<{ released: boolean }>(port, '/api/agy/lease', { method: 'DELETE' })).released
+      : releaseAgyLease(paths, { force: true });
+    if (asJson) {
+      console.log(JSON.stringify({ ok: true, released }, null, 2));
+    } else {
+      console.log(released ? 'Đã mở khóa agy.lock.' : 'Không có file agy.lock để xóa.');
+    }
+    return 0;
+  }
+
+  throw new Error('Cú pháp: gpool agy-lock <status|unlock> [--json]');
 }
 
 async function handleAuth(
@@ -835,17 +1059,20 @@ async function handleCooldown(
 ): Promise<number> {
   const [alias, durationArg] = args;
   if (!alias || !durationArg) {
-    throw new Error('Cú pháp: gpool cooldown <alias> <hours|clear> [--reason "..."]');
+    throw new Error('Cú pháp: gpool cooldown <alias> <hours|clear> [--bucket all|pro|claude|flash] [--reason "..."]');
   }
 
   const isClear = durationArg.toLowerCase() === 'clear' || durationArg === '0';
   const reason = getStrFlag(flags, 'reason') ?? '';
+  const bucket = getStrFlag(flags, 'bucket');
+  const bucketTag = bucket && bucket !== 'all' ? ` [${bucket}]` : '';
 
   if (await isDaemonAlive(port)) {
+    const bucketQs = bucket ? `?bucket=${encodeURIComponent(bucket)}` : '';
     const res = isClear
       ? await callDaemon<{ ok: boolean; account: AccountView }>(
           port,
-          `/api/accounts/${encodeURIComponent(alias)}/cooldown`,
+          `/api/accounts/${encodeURIComponent(alias)}/cooldown${bucketQs}`,
           { method: 'DELETE' },
         )
       : await callDaemon<{ ok: boolean; account: AccountView }>(
@@ -853,15 +1080,15 @@ async function handleCooldown(
           `/api/accounts/${encodeURIComponent(alias)}/cooldown`,
           {
             method: 'POST',
-            body: JSON.stringify({ hours: Number(durationArg), reason }),
+            body: JSON.stringify({ hours: Number(durationArg), reason, ...(bucket ? { bucket } : {}) }),
           },
         );
     if (asJson) console.log(JSON.stringify(res, null, 2));
     else {
       console.log(
         isClear
-          ? `Đã gỡ cooldown cho "${res.account.alias}".`
-          : `Đã đặt cooldown ${durationArg}h cho "${res.account.alias}".`,
+          ? `Đã gỡ cooldown${bucketTag} cho "${res.account.alias}".`
+          : `Đã đặt cooldown${bucketTag} ${durationArg}h cho "${res.account.alias}".`,
       );
     }
     return 0;
@@ -871,19 +1098,23 @@ async function handleCooldown(
   try {
     let updated;
     if (isClear) {
-      updated = db.clearCooldown(alias);
+      updated = db.clearCooldown(alias, bucket);
     } else {
       const hours = Number(durationArg);
       if (!Number.isFinite(hours) || hours <= 0) {
         throw new Error('Số giờ cooldown phải lớn hơn 0 (hoặc dùng "clear").');
       }
       const untilIso = new Date(Date.now() + hours * 3_600_000).toISOString();
-      updated = db.setCooldown(alias, untilIso, reason);
+      updated = bucket ? db.setBucketCooldown(alias, bucket, untilIso, reason) : db.setCooldown(alias, untilIso, reason);
     }
     const view = db.computeAccountView(updated, isAccountChromeRunning(updated).running);
     if (asJson) console.log(JSON.stringify({ ok: true, account: view }, null, 2));
     else {
-      console.log(isClear ? `Đã gỡ cooldown cho "${view.alias}".` : `Đã đặt cooldown ${durationArg}h cho "${view.alias}".`);
+      console.log(
+        isClear
+          ? `Đã gỡ cooldown${bucketTag} cho "${view.alias}".`
+          : `Đã đặt cooldown${bucketTag} ${durationArg}h cho "${view.alias}".`,
+      );
     }
     return 0;
   } finally {
@@ -1702,12 +1933,16 @@ function isBooleanFlag(key: string): boolean {
   return (
     key === 'json' ||
     key === 'no-open' ||
+    key === 'open' ||
     key === 'purge' ||
     key === 'help' ||
     key === 'isolated' ||
     key === 'all' ||
     key === 'dry-run' ||
-    key === 'force'
+    key === 'force' ||
+    key === 'agy' ||
+    key === 'auto-rotate' ||
+    key === 'interactive'
   );
 }
 
@@ -1806,11 +2041,16 @@ Quản lý & nhập tài khoản:
   gpool cooldown <alias> <giờ|clear>    Đặt hoặc gỡ cooldown thủ công
   gpool check [alias]                   Kiểm tra & làm mới cookie (1 acc hoặc toàn bộ pool)
 
-Phiên agy CLI (macOS Keychain):
+Phiên agy CLI (Auto-Failover, Keychain & MCP):
+  gpool agy [flags] -- <args...>        Chạy agy có tự phát hiện hết quota + tự xoay acc + khóa agy.lock
+  gpool agy-next [--cooldown <h>] [--bucket <bkt>]  Xoay sang acc agy kế tiếp & tự nạp Keychain (1 lệnh)
   gpool agy-capture <alias>             Lưu phiên agy hiện tại trong Keychain vào tài khoản này
   gpool agy-activate <alias> [--force]  Nạp phiên đã lưu vào Keychain — đổi acc agy không cần login lại
   gpool agy-status                      Xem phiên keychain hiện tại thuộc acc nào + các snapshot đã lưu
+  gpool agy-health [--json]             Kiểm tra sức khỏe toàn bộ snapshot agy + cảnh báo ngày gia hạn
+  gpool agy-lock <status|unlock>        Xem hoặc mở khóa agy.lock (chống xung đột Keychain giữa nhiều agent)
   gpool run <alias> -- agy              Tự nạp phiên đã lưu rồi chạy agy (với CLI khác: ADC / GEMINI_CLI_HOME)
+  gpool mcp                             Chạy MCP Server (stdio) cho AI Agents (Devin/Claude/Codex/Cursor)
 
 Daemon, Web Dashboard & macOS:
   gpool daemon <start|stop|status|run>  Quản lý dịch vụ nền & HTTP localhost:47891
@@ -1930,18 +2170,67 @@ Ví dụ:
   gpool switch pro2
   gpool switch pro2 --cooldown-prev 5 --reason "Hết quota"`,
 
-  next: `gpool next [--cooldown <giờ>] [--reason "..."] [--tag <tag>] [--no-open] (alias: rotate)
-Đặt cooldown cho tài khoản đang active rồi tự động xoay sang tài khoản sẵn sàng kế tiếp (ưu tiên live & ít dùng gần đây nhất).
+  agy: `gpool agy [flags] [-- <agy-args...>]
+Smart Auto-Failover Wrapper cho agy CLI:
+  - Tự lấy khóa agy.lock (chống 2 tiến trình tranh chấp Keychain)
+  - Tự chọn acc sẵn sàng đã lưu snapshot agy và nạp Keychain
+  - Ở chế độ batch/agent: tự phát hiện lỗi hết quota (429 / RESOURCE_EXHAUSTED / resets in ...),
+    đặt cooldown theo đúng thời gian reset, xoay sang acc kế tiếp và tự chạy lại!
+
+Flags:
+  --alias <alias>        Ưu tiên bắt đầu từ tài khoản này
+  --tag <tag>            Chỉ dùng các tài khoản có tag này
+  --bucket <name|auto>   Bucket cooldown (all, pro, claude, flash, opus, sonnet, hoặc auto)
+  --policy <p>           Chiến lược xoay: lru | round-robin | tier-first
+  --cooldown <giờ>       Ghi đè số giờ cooldown nếu lỗi không báo giờ reset cụ thể
+  --max-retries <N>      Số lần tự xoay vòng tối đa (mặc định: 3)
+  --wait <giây>          Chờ tối đa N giây nếu agy.lock đang bận
+  --timeout <giây>       Giới hạn thời gian mỗi lần chạy agy
+  --auto-rotate          Ép chế độ bắt lỗi quota & auto-failover
+  --force                Bỏ qua kiểm tra tiến trình agy đang chạy
+  --json                 Xuất kết quả JSON (cho script/agent)
+
+Ví dụ:
+  gpool agy                                   # mở agy tương tác với acc sẵn sàng + giữ khóa
+  gpool agy --bucket auto --max-retries 5 -- -p "Review PR này"`,
+
+  'agy-next': `gpool agy-next [--cooldown <giờ>] [--bucket <name>] [--tag <tag>] [--policy <p>] [--wait <giây>] [--force] [--open] [--json]
+Lệnh gọn 1 bước: đặt cooldown acc hiện tại, chọn acc sẵn sàng ĐÃ LƯU PHIÊN AGY kế tiếp, và nạp thẳng vào Keychain (không bật Chrome trừ khi truyền --open).
+
+Ví dụ:
+  gpool agy-next
+  gpool agy-next --cooldown 5 --bucket claude --policy tier-first`,
+
+  'agy-health': `gpool agy-health [--json]
+Kiểm tra sức khỏe toàn bộ snapshot agy (refresh_token, hạn access_token, khớp email, acc chưa capture), trạng thái khóa agy.lock và cảnh báo các tài khoản sắp đến ngày gia hạn gói.`,
+
+  'agy-lock': `gpool agy-lock <status|unlock> [--json]
+Xem tiến trình/agent nào đang giữ khóa agy.lock hoặc ép mở khóa (unlock) nếu cần.`,
+
+  mcp: `gpool mcp
+Khởi chạy Model Context Protocol (MCP) Server qua stdio (JSON-RPC 2.0) để AI Agents (Devin, Claude Code, Codex, Cursor, Hermes...) tự quản lý và xoay vòng pool agy.
+
+Các MCP tools tích hợp:
+  pool_status, agy_health, agy_acquire, agy_release,
+  agy_report_quota, agy_clear_cooldown, agy_run
+
+Xem cấu hình mẫu trong docs/CLI-GUIDE.md.`,
+
+  next: `gpool next [--cooldown <giờ>] [--reason "..."] [--tag <tag>] [--bucket <name>] [--policy lru|round-robin|tier-first] [--agy] [--force] [--no-open] (alias: rotate)
+Đặt cooldown cho tài khoản đang active rồi tự động xoay sang tài khoản sẵn sàng kế tiếp.
+Thêm --agy để chỉ chọn acc đã lưu snapshot agy và tự nạp luôn vào Keychain (mặc định không mở Chrome).
 
 Ví dụ:
   gpool next --cooldown 5
-  gpool next --tag coding --cooldown 24`,
+  gpool next --agy --bucket pro --policy tier-first`,
 
-  cooldown: `gpool cooldown <alias> <giờ | clear> [--reason "..."]
-Đặt hoặc gỡ cooldown thủ công cho một tài khoản.
+  cooldown: `gpool cooldown <alias> <giờ | clear> [--bucket all|pro|claude|flash] [--reason "..."]
+Đặt hoặc gỡ cooldown thủ công cho một tài khoản (toàn tài khoản hoặc riêng 1 bucket model).
 
 Ví dụ:
   gpool cooldown pro1 5 --reason "Hết hạn mức Gemini"
+  gpool cooldown pro1 3 --bucket claude --reason "Hết quota Claude"
+  gpool cooldown pro1 clear --bucket claude
   gpool cooldown pro1 clear`,
 
   'agy-capture': `gpool agy-capture <alias>

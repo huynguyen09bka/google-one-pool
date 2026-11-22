@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { DaemonSettings, PlanTier } from './types.ts';
+import type { DaemonSettings, PlanTier, RotationPolicy } from './types.ts';
 
 export const DEFAULT_PORT = 47891;
 export const DEFAULT_HOST = '127.0.0.1';
@@ -13,12 +13,19 @@ export const VALID_PLAN_TIERS: readonly PlanTier[] = [
   'Enterprise',
 ];
 
+export const VALID_ROTATION_POLICIES: readonly RotationPolicy[] = [
+  'lru',
+  'round-robin',
+  'tier-first',
+];
+
 export interface PoolPaths {
   homeDir: string;
   dbPath: string;
   chromeProfilesDir: string;
   geminiHomesDir: string;
   agySessionsDir: string;
+  agyLockPath: string;
   pidPath: string;
   logPath: string;
 }
@@ -35,6 +42,7 @@ export function resolvePaths(homeOverride?: string): PoolPaths {
     chromeProfilesDir: path.join(homeDir, 'chrome-profiles'),
     geminiHomesDir: path.join(homeDir, 'gemini-homes'),
     agySessionsDir: path.join(homeDir, 'agy-sessions'),
+    agyLockPath: path.join(homeDir, 'agy.lock'),
     pidPath: path.join(homeDir, 'daemon.pid'),
     logPath: path.join(homeDir, 'daemon.log'),
   };
@@ -88,6 +96,8 @@ export function getDefaultSettings(): DaemonSettings {
     notify_on_expiry: true,
     chrome_binary: detectDefaultChromeBinary(),
     default_open_url: 'https://gemini.google.com/app',
+    rotation_policy: 'lru',
+    renewal_alert_days: 7,
   };
 }
 
@@ -190,6 +200,29 @@ export function normalizeTags(tags: string[] | string | undefined): string[] {
     }
   }
   return result;
+}
+
+export function validateRotationPolicy(policy: string | undefined): RotationPolicy {
+  if (!policy || !policy.trim()) return 'lru';
+  const normalized = policy.trim().toLowerCase();
+  const matched = VALID_ROTATION_POLICIES.find((p) => p === normalized);
+  if (!matched) {
+    throw new Error(
+      `Chiến lược xoay vòng không hợp lệ ("${policy}"). Chọn: ${VALID_ROTATION_POLICIES.join(', ')}.`,
+    );
+  }
+  return matched;
+}
+
+export function validateBucketName(bucket: string | null | undefined): string {
+  if (!bucket || !bucket.trim()) return 'all';
+  const normalized = bucket.trim().toLowerCase();
+  if (!/^[a-z0-9][a-z0-9._-]{0,31}$/.test(normalized)) {
+    throw new Error(
+      `Tên bucket cooldown không hợp lệ ("${bucket}"). Chỉ dùng a-z, 0-9, ".", "-", "_", dài 1–32 ký tự (ví dụ: all, pro, claude, flash).`,
+    );
+  }
+  return normalized;
 }
 
 export function resolvePort(portOverride?: number): number {

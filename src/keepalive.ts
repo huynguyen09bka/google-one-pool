@@ -61,6 +61,7 @@ export class KeepAliveScheduler {
   private sweepPromise: Promise<KeepAliveResult[]> | null = null;
   private lastSweepAt: string | null = null;
   private lastError: string | null = null;
+  private lastRenewalNotifyDay: string | null = null;
 
   constructor(options: KeepAliveSchedulerOptions) {
     this.db = options.db;
@@ -117,6 +118,23 @@ export class KeepAliveScheduler {
       }
 
       const settings = this.db.getSettings();
+      const todayKey = now.toISOString().slice(0, 10);
+      if (settings.notify_on_expiry && this.lastRenewalNotifyDay !== todayKey) {
+        const alerts = this.db.getRenewalAlerts(settings.renewal_alert_days, now);
+        if (alerts.length > 0) {
+          this.lastRenewalNotifyDay = todayKey;
+          const summary = alerts
+            .slice(0, 3)
+            .map((a) => `${a.alias} (${a.days_left <= 0 ? 'đã quá hạn' : `còn ${a.days_left} ngày`})`)
+            .join(', ');
+          await this.notifyFn(
+            'Google One Pool — Cảnh báo gia hạn gói',
+            `${alerts.length} tài khoản sắp gia hạn: ${summary}`,
+          );
+          this.onUpdate?.('renewal_alerts', { alerts });
+        }
+      }
+
       if (!settings.keepalive_enabled || this.sweeping) {
         return;
       }

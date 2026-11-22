@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { acquireAgyLease } from './agylock.ts';
+import { activateAgySession, listCapturedAliases, type AgySessionDeps } from './agysession.ts';
 import {
   decorateUrlForAccount,
   isAccountChromeRunning,
@@ -7,9 +9,9 @@ import {
   openProfileWindow,
   type OpenProfileWindowOptions,
 } from './chrome.ts';
-import type { PoolPaths } from './config.ts';
+import { validateBucketName, validateRotationPolicy, type PoolPaths } from './config.ts';
 import type { PoolDB } from './db.ts';
-import type { AccountRecord, AccountView, ProfileMode, RotateResult, SwitchResult } from './types.ts';
+import type { AccountRecord, AccountView, ProfileMode, RotateResult, RotationPolicy, SwitchResult } from './types.ts';
 
 export type OpenWindowFn = (options: OpenProfileWindowOptions) => Promise<{ pid: number | undefined }>;
 
@@ -31,8 +33,15 @@ export interface RotateNextOptions {
   cooldownHours?: number;
   reason?: string;
   tag?: string;
+  bucket?: string;
+  policy?: RotationPolicy;
+  requireAgy?: boolean;
+  activateAgy?: boolean;
+  forceAgy?: boolean;
+  waitLockSeconds?: number;
   openChrome?: boolean;
   openUrl?: string;
+  agyDeps?: AgySessionDeps;
 }
 
 export interface OfficialRunEnvResult {
@@ -151,31 +160,79 @@ export class PoolSwitcher {
     const settings = this.db.getSettings();
     const previous = this.db.getActiveAccount();
     const cooldownHours = options.cooldownHours ?? settings.default_cooldown_hours;
+    const bucket = validateBucketName(options.bucket);
+    const policy = options.policy ? validateRotationPolicy(options.policy) : settings.rotation_policy;
+    const needAgy = Boolean(options.activateAgy || options.requireAgy);
+    const capturedAliases = needAgy ? listCapturedAliases(this.paths) : undefined;
 
     if (previous && cooldownHours > 0) {
       const untilIso = new Date(Date.now() + cooldownHours * 3_600_000).toISOString();
-      this.db.setCooldown(previous.alias, untilIso, options.reason ?? 'Hết quota / chuyển vòng xoay');
+      this.db.setBucketCooldown(
+        previous.alias,
+        bucket,
+        untilIso,
+        options.reason ?? 'Hết quota / chuyển vòng xoay',
+      );
     }
 
     const next = this.db.pickNextReadyAccount({
       tag: options.tag,
       excludeAlias: previous?.alias,
+      bucket,
+      policy,
+      requireAgyAliases: capturedAliases,
     });
 
     if (!next) {
-      const nextAvailableAt = this.db.getEarliestCooldownEnd(options.tag);
+      const nextAvailableAt = this.db.getEarliestCooldownEnd(options.tag, new Date(), bucket, capturedAliases);
+      const scopeParts: string[] = [];
+      if (needAgy) scopeParts.push('đã lưu phiên agy');
+      if (bucket !== 'all') scopeParts.push(`bucket "${bucket}"`);
+      if (options.tag) scopeParts.push(`tag "${options.tag}"`);
+      const scopeHint = scopeParts.length > 0 ? ` (${scopeParts.join(', ')})` : '';
       return {
         ok: false,
         previousAlias: previous?.alias ?? null,
-        error: options.tag
-          ? `Không còn tài khoản sẵn sàng nào có tag "${options.tag}".`
-          : 'Không còn tài khoản nào đang sẵn sàng (tất cả đang cooldown hoặc cần đăng nhập lại).',
+        bucket,
+        policy,
+        error: `Không còn tài khoản sẵn sàng nào${scopeHint} — tất cả đang cooldown, chưa lưu agy, hoặc cần đăng nhập lại.`,
         nextAvailableAt,
       };
     }
 
+    let agyActivated = false;
+    let recapturedAlias: string | null = null;
+    if (options.activateAgy) {
+      const lease = await acquireAgyLease(this.paths, {
+        alias: next.alias,
+        holder: 'gpool-next',
+        ttlMs: 30_000,
+        waitMs: Math.max(0, (options.waitLockSeconds ?? 0) * 1000),
+      });
+      try {
+        const actRes = activateAgySession(
+          this.paths,
+          next,
+          { force: Boolean(options.forceAgy) },
+          options.agyDeps,
+        );
+        agyActivated = true;
+        recapturedAlias = actRes.recaptured_alias;
+        const extra = recapturedAlias ? ` (đã cập nhật snapshot "${recapturedAlias}")` : '';
+        this.db.addEvent(
+          next.id,
+          next.alias,
+          'agy_session_activated',
+          `Xoay vòng nạp phiên agy của ${next.alias} vào Keychain${extra}`,
+        );
+      } finally {
+        lease.release();
+      }
+    }
+
+    const openChrome = options.openChrome !== undefined ? options.openChrome : !options.activateAgy;
     const switched = await this.switchTo(next.alias, {
-      openChrome: options.openChrome,
+      openChrome,
       openUrl: options.openUrl,
     });
 
@@ -186,6 +243,10 @@ export class PoolSwitcher {
       openedChrome: switched.openedChrome,
       openedUrl: switched.openedUrl,
       agyGuide: switched.agyGuide,
+      agyActivated,
+      recapturedAlias,
+      bucket,
+      policy,
     };
   }
 

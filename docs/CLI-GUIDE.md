@@ -95,7 +95,8 @@ gpool tui      # Mở TUI tường minh (alias: gpool ui)
 | `a` | Nạp phiên `agy` đã lưu của acc đang chọn vào Keychain | `gpool agy-activate <alias>` |
 | `c` | Lưu phiên `agy` hiện đang đăng nhập trong Keychain vào acc đang chọn | `gpool agy-capture <alias>` |
 | `A` (`Shift+a`) | Xem chi tiết trạng thái Keychain `agy` & toàn bộ snapshot đã lưu | `gpool agy-status` |
-| `n` | Hết quota → đặt cooldown cho acc hiện tại và xoay sang acc kế tiếp | `gpool next` |
+| `H` (`Shift+h`) | Kiểm tra sức khỏe snapshot `agy`, trạng thái khóa `agy.lock` (`[U]` mở khóa) & cảnh báo gia hạn | `gpool agy-health` |
+| `n` / `N` | `n`: Xoay acc (+Chrome) • `N`: **Xoay nhanh `agy` kế tiếp & nạp thẳng Keychain** | `gpool next` / `gpool agy-next` |
 | `o` | Mở / focus cửa sổ Chrome Profile | `gpool open <alias>` |
 | `l` | Mở Chrome tại trang đăng nhập Google (điền sẵn email) | `gpool login <alias>` |
 | `u` | Mở link OAuth (tự điền sẵn từ Clipboard macOS) vào đúng profile | `gpool auth <alias> [url]` |
@@ -175,27 +176,57 @@ agy
 2. **TUYỆT ĐỐI KHÔNG dùng `/logout` để đổi acc đã lưu**: lệnh `/logout` gửi yêu cầu thu hồi (revoke) refresh token trên máy chủ Google, làm snapshot đã lưu của tài khoản đó hết hiệu lực. Chỉ cần đóng `agy` → chạy `gpool agy-activate <alias>` (hoặc `gpool run <alias> -- agy`) → mở lại.
 3. **Tự động bảo toàn token mới nhất**: mỗi khi đổi từ acc A sang acc B, `gpool` tự động cập nhật lại snapshot của acc A bằng token mới nhất đang nằm trong Keychain (tránh bị trôi refresh token). Nếu Keychain đang chứa phiên lạ chưa thuộc acc nào trong pool, `gpool` sao lưu dự phòng vào `~/.google-one-pool/agy-sessions/_orphan.json`.
 
-### Quy trình B — Hết quota và xoay vòng tự động
+### Quy trình B — Tự động xoay vòng & Auto-Failover với `gpool agy` (Khuyên dùng)
 
-Khi tài khoản hiện tại bị giới hạn quota (ví dụ 5 giờ):
-
-```bash
-# Đặt cooldown 5h cho acc hiện tại, tự tìm acc sẵn sàng kế tiếp (ưu tiên live + ít dùng gần đây nhất)
-gpool next --cooldown 5 --reason "Hết quota Gemini Pro"
-
-# Chỉ xoay trong nhóm tài khoản có tag "work"
-gpool next --tag work --cooldown 5
-
-# Đặt hoặc gỡ cooldown thủ công cho 1 tài khoản cụ thể
-gpool cooldown pro1 24 --reason "Chờ reset ngày mai"
-gpool cooldown pro1 clear
-```
-
-Sau khi xoay sang acc mới (ví dụ `pro2`), nạp phiên `agy` và chạy tiếp:
+Thay vì tự xoay bằng tay khi đụng rate-limit, chạy `agy` qua lớp bọc **`gpool agy`**:
 
 ```bash
-gpool run pro2 -- agy
+# 1. Chế độ tương tác: tự chọn acc agy sẵn sàng + giữ khóa agy.lock + tự cập nhật snapshot lúc thoát
+gpool agy
+
+# 2. Chế độ tự động / batch / agent (Auto-Failover):
+#    Nếu acc hiện tại báo 429 / RESOURCE_EXHAUSTED / "resets in 3h 40m":
+#    → tự parse đúng thời gian reset → đặt cooldown → xoay sang acc kế tiếp → tự chạy lại!
+gpool agy --bucket auto --max-retries 5 -- -p "Review toàn bộ PR này"
+
+# 3. Xoay nhanh 1 bước (đặt cooldown acc hiện tại + chọn acc đã capture + nạp thẳng Keychain, không bật Chrome)
+gpool agy-next --cooldown 5 --bucket claude --policy tier-first
+
+# 4. Cooldown riêng theo bucket model (hết Claude vẫn dùng được Flash/Pro trên cùng tài khoản)
+gpool cooldown pro1 3 --bucket claude --reason "Hết quota Claude"
+gpool cooldown pro1 clear --bucket claude
+
+# 5. Kiểm tra sức khỏe toàn bộ snapshot agy & cảnh báo ngày gia hạn
+gpool agy-health
+
+# 6. Kiểm tra hoặc mở khóa agy.lock (chống xung đột Keychain giữa nhiều agent/terminal)
+gpool agy-lock status
+gpool agy-lock unlock
 ```
+
+### Quy trình B2 — Tích hợp MCP Server (`gpool mcp`) cho AI Agents
+
+Để Devin CLI, Claude Code, Codex, Cursor hoặc bất kỳ agent nào hỗ trợ MCP tự quản lý và xoay vòng pool `agy`, khai báo MCP server chạy lệnh `node <repo>/bin/gpool.ts mcp`:
+
+```json
+{
+  "mcpServers": {
+    "google-one-pool": {
+      "command": "node",
+      "args": ["/Users/huynguyen-max/Documents/GitHub/google-one-pool/bin/gpool.ts", "mcp"]
+    }
+  }
+}
+```
+
+7 tools được cung cấp qua MCP:
+- `pool_status`: tổng quan pool, acc active, chủ Keychain `agy`, trạng thái khóa `agy.lock`, mốc hết cooldown gần nhất.
+- `agy_health`: kiểm tra sức khỏe toàn bộ snapshot (`refresh_token`, hạn `access_token`, khớp email) và cảnh báo gia hạn.
+- `agy_acquire`: chọn acc tốt nhất (lọc theo `tag`, `bucket`, `policy`), giữ khóa `agy.lock`, nạp Keychain.
+- `agy_release`: giải phóng khóa `agy.lock`.
+- `agy_report_quota`: báo lỗi hết quota (tự parse thời gian reset & bucket từ `error_text`), đặt cooldown và tự xoay + nạp Keychain sang acc kế tiếp.
+- `agy_clear_cooldown`: gỡ cooldown toàn tài khoản hoặc theo bucket.
+- `agy_run`: chạy 1 job `agy` trọn gói có tự động failover nhiều tài khoản.
 
 ### Quy trình C — Chuyển từ `linked` sang `isolated` để Keep-Alive chạy ngầm độc lập
 
@@ -291,13 +322,18 @@ gpool list --status ready --json | jq -r '.accounts[].alias'
 | `cooldown` | `gpool cooldown <alias> <giờ \| clear> [--reason "..."] [--json]` | Đặt hoặc gỡ cooldown thủ công |
 | `check` | `gpool check [alias] [--json]` | Kiểm tra & làm mới phiên cho 1 acc hoặc toàn bộ pool |
 
-### Phiên `agy` CLI (macOS Keychain) & chạy lệnh
+### Phiên `agy` CLI (Auto-Failover, Keychain, Health & MCP)
 | Lệnh | Cú pháp & Flags | Mô tả |
 | :--- | :--- | :--- |
+| `agy` | `gpool agy [--alias <a>] [--tag <t>] [--bucket all\|pro\|claude\|flash\|auto] [--policy lru\|round-robin\|tier-first] [--cooldown <h>] [--max-retries <N>] [--wait <s>] [--timeout <s>] [--auto-rotate] [--force] [--json] [-- <args...>]` | Smart wrapper chạy `agy` có khóa `agy.lock`, tự nạp Keychain và tự failover xoay acc khi hết quota |
+| `agy-next` | `gpool agy-next [--cooldown <h>] [--bucket <bkt>] [--tag <t>] [--policy <p>] [--wait <s>] [--force] [--open] [--json]` | Đặt cooldown acc hiện tại, xoay sang acc đã lưu `agy` kế tiếp và nạp thẳng vào Keychain |
 | `agy-capture` | `gpool agy-capture <alias> [--json]` | Lưu phiên `agy` hiện tại trong Keychain vào snapshot của `<alias>` |
 | `agy-activate` | `gpool agy-activate <alias> [--force] [--json]` | Nạp snapshot phiên `agy` của `<alias>` vào Keychain (tự re-capture acc cũ trước) |
 | `agy-status` | `gpool agy-status [--json]` | Xem phiên đang nạp trong Keychain, tiến trình `agy` đang chạy và danh sách snapshot |
+| `agy-health` | `gpool agy-health [--json]` | Kiểm tra sức khỏe toàn bộ snapshot `agy` (`refresh_token`, hạn token, khớp email) + cảnh báo gia hạn |
+| `agy-lock` | `gpool agy-lock <status\|unlock> [--json]` | Xem tiến trình đang giữ khóa `agy.lock` hoặc mở khóa khẩn cấp |
 | `run` | `gpool run <alias> [--force] -- <lệnh...>` | Chạy lệnh với ngữ cảnh tài khoản (`agy`: tự nạp Keychain/ADC; `gemini`: `GEMINI_CLI_HOME`) |
+| `mcp` | `gpool mcp` | Chạy MCP Server qua `stdio` (JSON-RPC 2.0) cho AI Agents |
 
 ### Dịch vụ nền, Dashboard, macOS & Sao lưu
 | Lệnh | Cú pháp & Flags | Mô tả |

@@ -13,6 +13,74 @@ export type PlanTier = 'Google AI Pro' | 'Google AI Ultra' | 'Free' | 'Enterpris
 
 export type ProfileMode = 'isolated' | 'linked';
 
+export type RotationPolicy = 'lru' | 'round-robin' | 'tier-first';
+
+export interface BucketCooldown {
+  bucket: string;
+  cooldown_until: string;
+  cooldown_reason: string | null;
+  remaining_ms: number;
+}
+
+export interface AgyLeaseInfo {
+  pid: number;
+  alias: string;
+  holder: string;
+  acquired_at: string;
+  expires_at: string;
+  stale: boolean;
+}
+
+export type AgyHealthStatus =
+  | 'healthy'
+  | 'needs_refresh'
+  | 'missing_snapshot'
+  | 'email_mismatch'
+  | 'corrupt';
+
+export interface AgyHealthEntry {
+  alias: string;
+  email: string;
+  plan_tier: PlanTier;
+  captured: boolean;
+  captured_at: string | null;
+  detected_email: string | null;
+  email_matches: boolean;
+  has_refresh_token: boolean;
+  token_expiry: string | null;
+  access_token_expired: boolean | null;
+  auth_method: string | null;
+  health: AgyHealthStatus;
+  detail: string;
+  is_live: boolean;
+}
+
+export interface RenewalAlert {
+  alias: string;
+  email: string;
+  plan_tier: PlanTier;
+  renewal_date: string;
+  days_left: number;
+}
+
+export interface AgyHealthReport {
+  checked_at: string;
+  keychain_present: boolean;
+  live_owner_alias: string | null;
+  running_clients: string[];
+  lease: AgyLeaseInfo | null;
+  summary: {
+    total: number;
+    healthy: number;
+    needs_refresh: number;
+    missing_snapshot: number;
+    issues: number;
+    renewal_alerts: number;
+  };
+  accounts: AgyHealthEntry[];
+  renewal_alerts: RenewalAlert[];
+}
+
 export interface AccountRecord {
   id: number;
   alias: string;
@@ -53,6 +121,7 @@ export interface AgySessionInfo {
 export interface AccountView extends AccountRecord {
   effective_state: EffectiveState;
   cooldown_remaining_ms: number;
+  bucket_cooldowns?: BucketCooldown[];
   renewal_days_left: number | null;
   chrome_running: boolean;
   agy_session?: AgySessionInfo | null;
@@ -110,6 +179,8 @@ export interface DaemonSettings {
   notify_on_expiry: boolean;
   chrome_binary: string;
   default_open_url: string;
+  rotation_policy: RotationPolicy;
+  renewal_alert_days: number;
 }
 
 export interface SwitchResult {
@@ -128,6 +199,10 @@ export interface RotateResult {
   openedChrome?: boolean;
   openedUrl?: string | null;
   agyGuide?: string;
+  agyActivated?: boolean;
+  recapturedAlias?: string | null;
+  bucket?: string;
+  policy?: RotationPolicy;
   error?: string;
   nextAvailableAt?: string | null;
 }

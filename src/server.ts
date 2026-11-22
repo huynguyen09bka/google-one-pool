@@ -8,11 +8,13 @@ import {
   getDefaultBrowserRoots,
   type BrowserScanRoot,
 } from './browser-import.ts';
+import { readAgyLease, releaseAgyLease } from './agylock.ts';
 import {
   activateAgySession,
   captureAgySession,
   getAgySessionStatus,
   getLiveKeychainContext,
+  inspectAgyHealth,
   sessionInfoForAlias,
   type LiveKeychainContext,
 } from './agysession.ts';
@@ -30,6 +32,7 @@ import type {
   PlanTier,
   PoolExportPayload,
   ProfileMode,
+  RotationPolicy,
   UpdateAccountInput,
 } from './types.ts';
 
@@ -132,13 +135,18 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
       error: accounts.filter((a) => a.effective_state === 'error').length,
     };
 
+    const settings = options.db.getSettings();
+    const renewalAlerts = options.db.getRenewalAlerts(settings.renewal_alert_days);
+
     return {
       accounts,
       activeAlias: active?.alias ?? null,
       summary,
       keepalive: options.keepalive.getStatus(),
-      settings: options.db.getSettings(),
+      settings,
       events: options.db.listEvents(40),
+      agyLease: readAgyLease(options.paths),
+      renewalAlerts,
       agyStatus: liveCtx
         ? {
             keychain_present: liveCtx.present,
@@ -272,6 +280,8 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
           keepalive: allSnapshot.keepalive,
           settings: allSnapshot.settings,
           agyStatus: allSnapshot.agyStatus,
+          agyLease: allSnapshot.agyLease,
+          renewalAlerts: allSnapshot.renewalAlerts,
         });
         return;
       }
@@ -442,12 +452,28 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
           cooldownHours?: number;
           reason?: string;
           tag?: string;
+          bucket?: string;
+          policy?: RotationPolicy;
+          requireAgy?: boolean;
+          activateAgy?: boolean;
+          forceAgy?: boolean;
+          waitLockSeconds?: number;
           openChrome?: boolean;
           openUrl?: string;
         }>(req, true);
-        const result = await options.switcher.rotateNext(body);
-        broadcast('state_changed', buildSnapshot());
-        sendJson(res, result.ok ? 200 : 409, result);
+        try {
+          const result = await options.switcher.rotateNext(body);
+          broadcast('state_changed', buildSnapshot());
+          sendJson(res, result.ok ? 200 : 409, result);
+          return;
+        } catch (err) {
+          throw new HttpError(400, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      if (method === 'POST' && pathname === '/api/sync') {
+        broadcastSnapshot();
+        sendJson(res, 200, { ok: true });
         return;
       }
 
@@ -471,6 +497,31 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
         } catch (err) {
           throw new HttpError(400, err instanceof Error ? err.message : String(err));
         }
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/api/agy/health') {
+        try {
+          options.db.expireElapsedCooldowns();
+          const settings = options.db.getSettings();
+          const alerts = options.db.getRenewalAlerts(settings.renewal_alert_days);
+          const report = inspectAgyHealth(options.paths, options.db.listAccounts(), alerts);
+          sendJson(res, 200, { ok: true, ...report });
+        } catch (err) {
+          throw new HttpError(400, err instanceof Error ? err.message : String(err));
+        }
+        return;
+      }
+
+      if (method === 'GET' && pathname === '/api/agy/lease') {
+        sendJson(res, 200, { ok: true, lease: readAgyLease(options.paths) });
+        return;
+      }
+
+      if (method === 'DELETE' && pathname === '/api/agy/lease') {
+        const released = releaseAgyLease(options.paths, { force: true });
+        broadcast('state_changed', buildSnapshot());
+        sendJson(res, 200, { ok: true, released });
         return;
       }
 
@@ -662,7 +713,7 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
         }
 
         if (action === 'cooldown' && method === 'POST') {
-          const body = await readJsonBody<{ hours?: number; until?: string; reason?: string }>(req);
+          const body = await readJsonBody<{ hours?: number; until?: string; reason?: string; bucket?: string }>(req);
           let untilIso: string;
           if (body.until) {
             untilIso = body.until;
@@ -675,7 +726,9 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
           }
 
           try {
-            const updated = options.db.setCooldown(aliasParam, untilIso, body.reason ?? '');
+            const updated = body.bucket
+              ? options.db.setBucketCooldown(aliasParam, body.bucket, untilIso, body.reason ?? '')
+              : options.db.setCooldown(aliasParam, untilIso, body.reason ?? '');
             const running = isAccountChromeRunning(updated).running;
             broadcast('state_changed', buildSnapshot());
             sendJson(res, 200, { ok: true, account: options.db.computeAccountView(updated, running) });
@@ -727,8 +780,9 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
         }
 
         if (action === 'cooldown' && method === 'DELETE') {
+          const bucketParam = url.searchParams.get('bucket') ?? undefined;
           try {
-            const updated = options.db.clearCooldown(aliasParam);
+            const updated = options.db.clearCooldown(aliasParam, bucketParam);
             const running = isAccountChromeRunning(updated).running;
             broadcast('state_changed', buildSnapshot());
             sendJson(res, 200, { ok: true, account: options.db.computeAccountView(updated, running) });

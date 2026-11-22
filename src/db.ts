@@ -7,15 +7,18 @@ import {
   getDefaultSettings,
   normalizeTags,
   validateAlias,
+  validateBucketName,
   validateEmail,
   validatePlanTier,
   validateProxyUrl,
   validateRenewalDate,
+  validateRotationPolicy,
   type PoolPaths,
 } from './config.ts';
 import type {
   AccountRecord,
   AccountView,
+  BucketCooldown,
   CreateAccountInput,
   DaemonSettings,
   EffectiveState,
@@ -23,6 +26,8 @@ import type {
   PoolEvent,
   PoolExportPayload,
   ProfileMode,
+  RenewalAlert,
+  RotationPolicy,
   SessionStatus,
   UpdateAccountInput,
 } from './types.ts';
@@ -70,6 +75,14 @@ interface SettingRow {
   value: string;
 }
 
+interface BucketCooldownRow {
+  account_id: number;
+  bucket: string;
+  cooldown_until: string;
+  cooldown_reason: string | null;
+  updated_at: string;
+}
+
 export interface ListAccountsFilter {
   q?: string;
   tag?: string;
@@ -79,6 +92,10 @@ export interface ListAccountsFilter {
 export interface PickNextOptions {
   tag?: string;
   excludeAlias?: string;
+  excludeAliases?: Iterable<string>;
+  bucket?: string;
+  policy?: RotationPolicy;
+  requireAgyAliases?: Set<string>;
   now?: Date;
 }
 
@@ -148,6 +165,16 @@ export class PoolDB {
       CREATE TABLE IF NOT EXISTS settings (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS account_cooldowns (
+        account_id INTEGER NOT NULL,
+        bucket TEXT NOT NULL,
+        cooldown_until TEXT NOT NULL,
+        cooldown_reason TEXT,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (account_id, bucket),
+        FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
       );
     `);
 
@@ -257,10 +284,13 @@ export class PoolDB {
       effectiveState = 'unknown';
     }
 
+    const bucketCooldowns = this.listBucketCooldowns(account.id, now);
+
     return {
       ...account,
       effective_state: effectiveState,
       cooldown_remaining_ms: cooldownRemainingMs,
+      bucket_cooldowns: bucketCooldowns,
       renewal_days_left: renewalDaysLeft,
       chrome_running: chromeRunning,
     };
@@ -279,6 +309,15 @@ export class PoolDB {
       }
     }
 
+    let rotationPolicy: RotationPolicy = defaults.rotation_policy;
+    if (typeof merged.rotation_policy === 'string') {
+      try {
+        rotationPolicy = validateRotationPolicy(merged.rotation_policy);
+      } catch {
+        rotationPolicy = defaults.rotation_policy;
+      }
+    }
+
     return {
       keepalive_enabled: Boolean(merged.keepalive_enabled),
       keepalive_interval_minutes: clampNumber(merged.keepalive_interval_minutes, 10, 1440, defaults.keepalive_interval_minutes),
@@ -294,6 +333,8 @@ export class PoolDB {
         typeof merged.default_open_url === 'string' && merged.default_open_url.trim()
           ? merged.default_open_url.trim()
           : defaults.default_open_url,
+      rotation_policy: rotationPolicy,
+      renewal_alert_days: clampNumber(merged.renewal_alert_days, 1, 90, defaults.renewal_alert_days),
     };
   }
 
@@ -328,6 +369,14 @@ export class PoolDB {
         partial.default_open_url !== undefined && partial.default_open_url.trim()
           ? validateHttpOpenUrl(partial.default_open_url)
           : current.default_open_url,
+      rotation_policy:
+        partial.rotation_policy !== undefined
+          ? validateRotationPolicy(partial.rotation_policy)
+          : current.rotation_policy,
+      renewal_alert_days:
+        partial.renewal_alert_days !== undefined
+          ? clampNumber(partial.renewal_alert_days, 1, 90, current.renewal_alert_days)
+          : current.renewal_alert_days,
     };
 
     const stmt = this.db.prepare(
@@ -779,15 +828,41 @@ export class PoolDB {
     return updated;
   }
 
-  clearCooldown(aliasOrId: string | number): AccountRecord {
+  clearCooldown(aliasOrId: string | number, bucket?: string): AccountRecord {
     const existing = this.getAccount(aliasOrId);
     if (!existing) {
       throw new Error(`Không tìm thấy tài khoản "${aliasOrId}".`);
     }
+    const cleanBucket = bucket ? validateBucketName(bucket) : undefined;
     const nowIso = new Date().toISOString();
-    this.db
-      .prepare('UPDATE accounts SET cooldown_until = NULL, cooldown_reason = NULL, updated_at = ? WHERE id = ?')
-      .run(nowIso, existing.id);
+
+    if (cleanBucket && cleanBucket !== 'all') {
+      this.db
+        .prepare('DELETE FROM account_cooldowns WHERE account_id = ? AND bucket = ?')
+        .run(existing.id, cleanBucket);
+      const updated = this.getAccount(existing.id)!;
+      this.addEvent(
+        updated.id,
+        updated.alias,
+        'cooldown_cleared',
+        `Đã gỡ cooldown [${cleanBucket}] cho ${updated.alias}`,
+      );
+      return updated;
+    }
+
+    this.db.exec('BEGIN');
+    try {
+      this.db
+        .prepare('UPDATE accounts SET cooldown_until = NULL, cooldown_reason = NULL, updated_at = ? WHERE id = ?')
+        .run(nowIso, existing.id);
+      if (!cleanBucket) {
+        this.db.prepare('DELETE FROM account_cooldowns WHERE account_id = ?').run(existing.id);
+      }
+      this.db.exec('COMMIT');
+    } catch (err) {
+      this.db.exec('ROLLBACK');
+      throw err;
+    }
 
     const updated = this.getAccount(existing.id)!;
     this.addEvent(updated.id, updated.alias, 'cooldown_cleared', `Đã gỡ cooldown cho ${updated.alias}`);
@@ -795,10 +870,80 @@ export class PoolDB {
   }
 
   /**
-   * Clears elapsed cooldowns and returns aliases that just became ready again.
+   * Sets a cooldown scoped to a specific model/quota bucket (e.g. `pro`, `claude`, `flash`),
+   * or account-wide when `bucket` is `'all'`.
+   */
+  setBucketCooldown(
+    aliasOrId: string | number,
+    bucket: string,
+    untilIso: string,
+    reason = '',
+  ): AccountRecord {
+    const cleanBucket = validateBucketName(bucket);
+    if (cleanBucket === 'all') {
+      return this.setCooldown(aliasOrId, untilIso, reason);
+    }
+
+    const existing = this.getAccount(aliasOrId);
+    if (!existing) {
+      throw new Error(`Không tìm thấy tài khoản "${aliasOrId}".`);
+    }
+    const untilMs = Date.parse(untilIso);
+    if (Number.isNaN(untilMs)) {
+      throw new Error(`Thời gian cooldown không hợp lệ: "${untilIso}".`);
+    }
+
+    const normalizedUntil = new Date(untilMs).toISOString();
+    const nowIso = new Date().toISOString();
+    const cleanReason = reason.trim();
+
+    this.db
+      .prepare(`
+        INSERT INTO account_cooldowns (account_id, bucket, cooldown_until, cooldown_reason, updated_at)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(account_id, bucket) DO UPDATE SET
+          cooldown_until = excluded.cooldown_until,
+          cooldown_reason = excluded.cooldown_reason,
+          updated_at = excluded.updated_at
+      `)
+      .run(existing.id, cleanBucket, normalizedUntil, cleanReason || null, nowIso);
+
+    const updated = this.getAccount(existing.id)!;
+    this.addEvent(
+      updated.id,
+      updated.alias,
+      'bucket_cooldown_set',
+      `Đặt cooldown [${cleanBucket}] cho ${updated.alias} đến ${normalizedUntil}${cleanReason ? ` (${cleanReason})` : ''}`,
+    );
+    return updated;
+  }
+
+  listBucketCooldowns(accountId: number, now: Date = new Date()): BucketCooldown[] {
+    const nowMs = now.getTime();
+    const rows = this.db
+      .prepare('SELECT * FROM account_cooldowns WHERE account_id = ? ORDER BY bucket ASC')
+      .all(accountId) as unknown as BucketCooldownRow[];
+    const active: BucketCooldown[] = [];
+    for (const row of rows) {
+      const untilMs = Date.parse(row.cooldown_until);
+      if (!Number.isNaN(untilMs) && untilMs > nowMs) {
+        active.push({
+          bucket: row.bucket,
+          cooldown_until: row.cooldown_until,
+          cooldown_reason: row.cooldown_reason,
+          remaining_ms: untilMs - nowMs,
+        });
+      }
+    }
+    return active;
+  }
+
+  /**
+   * Clears elapsed cooldowns (both account-wide and per-bucket) and returns aliases that just became ready again.
    */
   expireElapsedCooldowns(now: Date = new Date()): string[] {
     const nowIso = now.toISOString();
+    const nowMs = now.getTime();
     const rows = this.db
       .prepare('SELECT id, alias, cooldown_until FROM accounts WHERE cooldown_until IS NOT NULL')
       .all() as unknown as Array<{ id: number; alias: string; cooldown_until: string }>;
@@ -806,20 +951,33 @@ export class PoolDB {
     const expired: Array<{ id: number; alias: string }> = [];
     for (const row of rows) {
       const ms = Date.parse(row.cooldown_until);
-      if (Number.isNaN(ms) || ms <= now.getTime()) {
+      if (Number.isNaN(ms) || ms <= nowMs) {
         expired.push({ id: row.id, alias: row.alias });
       }
     }
 
-    if (expired.length === 0) return [];
+    const bucketRows = this.db
+      .prepare('SELECT account_id, bucket, cooldown_until FROM account_cooldowns')
+      .all() as unknown as Array<{ account_id: number; bucket: string; cooldown_until: string }>;
+    const expiredBuckets = bucketRows.filter((row) => {
+      const ms = Date.parse(row.cooldown_until);
+      return Number.isNaN(ms) || ms <= nowMs;
+    });
+
+    if (expired.length === 0 && expiredBuckets.length === 0) return [];
 
     const stmt = this.db.prepare(
       'UPDATE accounts SET cooldown_until = NULL, cooldown_reason = NULL, updated_at = ? WHERE id = ?',
     );
+    const delBucket = this.db.prepare('DELETE FROM account_cooldowns WHERE account_id = ? AND bucket = ?');
+
     this.db.exec('BEGIN');
     try {
       for (const item of expired) {
         stmt.run(nowIso, item.id);
+      }
+      for (const b of expiredBuckets) {
+        delBucket.run(b.account_id, b.bucket);
       }
       this.db.exec('COMMIT');
     } catch (err) {
@@ -859,24 +1017,39 @@ export class PoolDB {
 
   /**
    * Picks the best next ready account for rotation:
-   * - Excludes `excludeAlias`
-   * - Excludes accounts in active cooldown (`cooldown_until > now`)
+   * - Excludes `excludeAlias` and `excludeAliases`
+   * - Excludes accounts in active cooldown (account-wide or matching `bucket`)
    * - Excludes `needs_login` and `error`
-   * - Filters by optional `tag`
-   * - Ranks `live` above `unknown`/`checking`, then least-recently-used (never used first, oldest last_used_at next).
+   * - Filters by optional `tag` and `requireAgyAliases`
+   * - Ranks `live` above `unknown`/`checking`, then by `policy`:
+   *   - `lru` (default): least-recently-used first (never used first, oldest last_used_at)
+   *   - `round-robin`: lowest use_count first, then oldest last_used_at
+   *   - `tier-first`: highest plan tier (Enterprise > Ultra > Pro > Free) first, then LRU
    */
   pickNextReadyAccount(options: PickNextOptions = {}): AccountRecord | null {
     const now = options.now ?? new Date();
     const nowMs = now.getTime();
-    const exclude = options.excludeAlias?.trim().toLowerCase();
+    const excludeSet = new Set<string>();
+    if (options.excludeAlias) excludeSet.add(options.excludeAlias.trim().toLowerCase());
+    if (options.excludeAliases) {
+      for (const a of options.excludeAliases) excludeSet.add(a.trim().toLowerCase());
+    }
     const requiredTag = options.tag?.trim().toLowerCase();
+    const bucket = validateBucketName(options.bucket);
+    const policy = options.policy ?? this.getSettings().rotation_policy;
+    const requireAgy = options.requireAgyAliases;
 
     const candidates = this.listAccounts().filter((acc) => {
-      if (exclude && acc.alias === exclude) return false;
+      if (excludeSet.has(acc.alias)) return false;
+      if (requireAgy && !requireAgy.has(acc.alias)) return false;
       if (acc.session_status === 'needs_login' || acc.session_status === 'error') return false;
       if (acc.cooldown_until) {
         const untilMs = Date.parse(acc.cooldown_until);
         if (!Number.isNaN(untilMs) && untilMs > nowMs) return false;
+      }
+      if (bucket !== 'all') {
+        const buckets = this.listBucketCooldowns(acc.id, now);
+        if (buckets.some((b) => b.bucket === bucket && b.remaining_ms > 0)) return false;
       }
       if (requiredTag && !acc.tags.includes(requiredTag)) return false;
       return true;
@@ -884,10 +1057,30 @@ export class PoolDB {
 
     if (candidates.length === 0) return null;
 
+    const tierRank = (tier: PlanTier): number => {
+      switch (tier) {
+        case 'Enterprise':
+          return 0;
+        case 'Google AI Ultra':
+          return 1;
+        case 'Google AI Pro':
+          return 2;
+        default:
+          return 3;
+      }
+    };
+
     candidates.sort((a, b) => {
       const aLive = a.session_status === 'live' ? 0 : 1;
       const bLive = b.session_status === 'live' ? 0 : 1;
       if (aLive !== bLive) return aLive - bLive;
+
+      if (policy === 'tier-first') {
+        const tr = tierRank(a.plan_tier) - tierRank(b.plan_tier);
+        if (tr !== 0) return tr;
+      } else if (policy === 'round-robin') {
+        if (a.use_count !== b.use_count) return a.use_count - b.use_count;
+      }
 
       const aUsed = a.last_used_at ? Date.parse(a.last_used_at) : -1;
       const bUsed = b.last_used_at ? Date.parse(b.last_used_at) : -1;
@@ -900,26 +1093,66 @@ export class PoolDB {
   }
 
   /**
-   * Returns the earliest future cooldown_until timestamp across all eligible accounts.
+   * Returns the earliest future cooldown_until timestamp across all eligible accounts
+   * (considering account-wide cooldowns and optional bucket / agy filter).
    */
-  getEarliestCooldownEnd(tag?: string, now: Date = new Date()): string | null {
+  getEarliestCooldownEnd(
+    tag?: string,
+    now: Date = new Date(),
+    bucket?: string,
+    requireAgyAliases?: Set<string>,
+  ): string | null {
     const nowMs = now.getTime();
     const requiredTag = tag?.trim().toLowerCase();
+    const cleanBucket = validateBucketName(bucket);
     let earliestMs: number | null = null;
 
-    for (const acc of this.listAccounts()) {
-      if (requiredTag && !acc.tags.includes(requiredTag)) continue;
-      if (acc.session_status === 'needs_login' || acc.session_status === 'error') continue;
-      if (!acc.cooldown_until) continue;
-      const untilMs = Date.parse(acc.cooldown_until);
+    const consider = (iso: string | null) => {
+      if (!iso) return;
+      const untilMs = Date.parse(iso);
       if (!Number.isNaN(untilMs) && untilMs > nowMs) {
         if (earliestMs === null || untilMs < earliestMs) {
           earliestMs = untilMs;
         }
       }
+    };
+
+    for (const acc of this.listAccounts()) {
+      if (requiredTag && !acc.tags.includes(requiredTag)) continue;
+      if (requireAgyAliases && !requireAgyAliases.has(acc.alias)) continue;
+      if (acc.session_status === 'needs_login' || acc.session_status === 'error') continue;
+      consider(acc.cooldown_until);
+      if (cleanBucket !== 'all') {
+        for (const b of this.listBucketCooldowns(acc.id, now)) {
+          if (b.bucket === cleanBucket) consider(b.cooldown_until);
+        }
+      }
     }
 
     return earliestMs !== null ? new Date(earliestMs).toISOString() : null;
+  }
+
+  /**
+   * Returns accounts whose renewal_date falls within `daysThreshold` days (including overdue).
+   */
+  getRenewalAlerts(daysThreshold?: number, now: Date = new Date()): RenewalAlert[] {
+    const limit = daysThreshold ?? this.getSettings().renewal_alert_days;
+    const alerts: RenewalAlert[] = [];
+    for (const acc of this.listAccounts()) {
+      if (!acc.renewal_date) continue;
+      const view = this.computeAccountView(acc, false, now);
+      if (view.renewal_days_left !== null && view.renewal_days_left <= limit) {
+        alerts.push({
+          alias: acc.alias,
+          email: acc.email,
+          plan_tier: acc.plan_tier,
+          renewal_date: acc.renewal_date,
+          days_left: view.renewal_days_left,
+        });
+      }
+    }
+    alerts.sort((a, b) => a.days_left - b.days_left);
+    return alerts;
   }
 
   addEvent(accountId: number | null, accountAlias: string | null, eventType: string, message: string): PoolEvent {

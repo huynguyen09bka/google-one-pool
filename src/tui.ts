@@ -2,12 +2,14 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline';
+import { readAgyLease, releaseAgyLease } from './agylock.ts';
 import {
   activateAgySession,
   captureAgySession,
   getAgySessionStatus,
   getLiveKeychainContext,
   hasSessionSnapshot,
+  inspectAgyHealth,
   sessionInfoForAlias,
   type AgyStatusResult,
 } from './agysession.ts';
@@ -31,6 +33,8 @@ import { getLaunchAgentStatus, installLaunchAgent, uninstallLaunchAgent } from '
 import { PoolSwitcher } from './switcher.ts';
 import type {
   AccountView,
+  AgyHealthReport,
+  AgyLeaseInfo,
   BulkImportItemInput,
   BulkImportResult,
   DaemonSettings,
@@ -70,6 +74,7 @@ export interface TuiSnapshot {
   settings: DaemonSettings;
   events: PoolEvent[];
   agyStatus: TuiAgySummary | null;
+  agyLease?: AgyLeaseInfo | null;
 }
 
 export interface TuiState {
@@ -107,6 +112,7 @@ export type TuiModal =
   | { type: 'confirm-force-agy'; alias: string; reason: string }
   | { type: 'events'; scroll: number }
   | { type: 'agy-status'; status: AgyStatusResult }
+  | { type: 'agy-health'; report: AgyHealthReport }
   | { type: 'help'; scroll: number };
 
 const USE_COLOR = !process.env.NO_COLOR;
@@ -364,6 +370,10 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
     : snap.agyStatus?.keychain_present
       ? paint(ANSI.yellow, `agy: ${snap.agyStatus.live_email ?? 'chưa lưu'}`)
       : paint(ANSI.gray, 'agy: trống');
+  const lockTag =
+    snap.agyLease && !snap.agyLease.stale
+      ? `  │  ${paint(ANSI.yellow + ANSI.bold, `lock: ${snap.agyLease.holder}`)}`
+      : '';
 
   const kpiParts = [
     `Tổng: ${paint(ANSI.bold, String(snap.summary.total))}`,
@@ -372,7 +382,7 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
     paint(ANSI.red, `Cần login: ${snap.summary.needs_login + snap.summary.error}`),
   ];
 
-  lines.push(boxLine(`${daemonTag}  │  ${kaTag}  │  ${agyOwner}`, innerW, ANSI.blue));
+  lines.push(boxLine(`${daemonTag}  │  ${kaTag}  │  ${agyOwner}${lockTag}`, innerW, ANSI.blue));
   const filterInfo = `Lọc: ${paint(ANSI.cyan, formatFilterName(state.filterStatus))}` +
     (state.searchQuery || state.searchActive
       ? `  │  Tìm: ${paint(ANSI.bold + ANSI.yellow, state.searchQuery)}${state.searchActive ? paint(ANSI.inverse, ' ') : ''}`
@@ -527,6 +537,12 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
           `Cooldown còn ${formatShortDuration(selectedAcc.cooldown_remaining_ms)}${selectedAcc.cooldown_reason ? ` (${selectedAcc.cooldown_reason})` : ''}`,
         ),
       );
+    }
+    if (selectedAcc.bucket_cooldowns && selectedAcc.bucket_cooldowns.length > 0) {
+      const bStr = selectedAcc.bucket_cooldowns
+        .map((b) => `[${b.bucket}] ${formatShortDuration(b.remaining_ms)}`)
+        .join(', ');
+      extraParts.push(paint(ANSI.yellow, `CD nhóm: ${bStr}`));
     }
     if (selectedAcc.proxy_url) extraParts.push(`Proxy: ${selectedAcc.proxy_url}`);
     if (selectedAcc.notes) extraParts.push(`Ghi chú: ${selectedAcc.notes}`);
@@ -804,6 +820,77 @@ function renderModal(state: TuiState, width: number, maxBodyRows: number): strin
     return out;
   }
 
+  if (modal.type === 'agy-health') {
+    const rep = modal.report;
+    out.push(boxTop('Sức khỏe phiên agy & Cảnh báo gia hạn ([U] mở khóa agy.lock, [Esc] đóng)', width, ANSI.cyan));
+    out.push(
+      boxLine(
+        `${paint(ANSI.brightGreen, `Khỏe mạnh: ${rep.summary.healthy}`)}  •  ` +
+          `${paint(ANSI.cyan, `Chờ refresh: ${rep.summary.needs_refresh}`)}  •  ` +
+          `${paint(ANSI.gray, `Chưa lưu: ${rep.summary.missing_snapshot}`)}  •  ` +
+          `${paint(rep.summary.issues > 0 ? ANSI.red : ANSI.gray, `Lỗi: ${rep.summary.issues}`)}`,
+        innerW,
+        ANSI.cyan,
+      ),
+    );
+    if (rep.lease) {
+      out.push(
+        boxLine(
+          paint(
+            ANSI.yellow,
+            `Khóa agy.lock: ${rep.lease.stale ? 'STALE' : 'ĐANG GIỮ'} — holder=${rep.lease.holder}, acc=${rep.lease.alias}, PID=${rep.lease.pid} (nhấn [U] để mở khóa)`,
+          ),
+          innerW,
+          ANSI.cyan,
+        ),
+      );
+    }
+    out.push(boxSep(width, ANSI.cyan));
+    out.push(
+      boxLine(
+        `${padRightWidth(paint(ANSI.bold, 'ALIAS'), 18)} ${padRightWidth(paint(ANSI.bold, 'SỨC KHỎE'), 16)} ${padRightWidth(paint(ANSI.bold, 'RT'), 5)} GHI CHÚ`,
+        innerW,
+        ANSI.cyan,
+      ),
+    );
+    const maxList = Math.max(4, maxBodyRows - (rep.renewal_alerts.length > 0 ? 8 : 6));
+    for (const acc of rep.accounts.slice(0, maxList)) {
+      const hColor =
+        acc.health === 'healthy'
+          ? ANSI.brightGreen
+          : acc.health === 'needs_refresh'
+            ? ANSI.cyan
+            : acc.health === 'missing_snapshot'
+              ? ANSI.gray
+              : ANSI.red;
+      const rt = acc.captured ? (acc.has_refresh_token ? 'có' : 'k') : '—';
+      out.push(
+        boxLine(
+          `${padRightWidth((acc.is_live ? '★ ' : '  ') + acc.alias, 18)} ${padRightWidth(paint(hColor, acc.health), 16)} ${padRightWidth(rt, 5)} ${truncateWidth(acc.detail, Math.max(16, innerW - 42))}`,
+          innerW,
+          ANSI.cyan,
+        ),
+      );
+    }
+    if (rep.renewal_alerts.length > 0) {
+      out.push(boxSep(width, ANSI.cyan));
+      for (const a of rep.renewal_alerts.slice(0, 3)) {
+        out.push(
+          boxLine(
+            paint(
+              ANSI.yellow,
+              `! Gia hạn: ${a.alias} (${a.plan_tier}) ngày ${a.renewal_date} (${a.days_left <= 0 ? 'quá hạn' : `còn ${a.days_left}n`})`,
+            ),
+            innerW,
+            ANSI.cyan,
+          ),
+        );
+      }
+    }
+    out.push(boxBottom(width, ANSI.cyan));
+    return out;
+  }
+
   if (modal.type === 'events') {
     const events = state.snapshot?.events ?? [];
     const visibleH = Math.max(6, maxBodyRows - 3);
@@ -830,8 +917,8 @@ function renderModal(state: TuiState, width: number, maxBodyRows: number): strin
     ['g', 'Nạp phiên agy & chạy trực tiếp lệnh agy CLI', 'gpool run <alias> -- agy'],
     ['a', 'Nạp phiên agy đã lưu vào macOS Keychain', 'gpool agy-activate <alias>'],
     ['c', 'Lưu phiên agy đang đăng nhập vào tài khoản', 'gpool agy-capture <alias>'],
-    ['A (Shift+a)', 'Xem trạng thái Keychain agy & danh sách snapshot', 'gpool agy-status'],
-    ['n', 'Đặt cooldown acc hiện tại & xoay sang acc kế tiếp', 'gpool next --cooldown 5'],
+    ['A / H', 'Xem trạng thái Keychain agy / Kiểm tra sức khỏe agy & gia hạn', 'gpool agy-status / agy-health'],
+    ['n / N', 'Xoay acc (+Chrome) / Xoay nhanh agy kế tiếp & nạp Keychain', 'gpool next / agy-next'],
     ['o / l', 'Mở Chrome Profile / Mở trang đăng nhập điền sẵn email', 'gpool open / login <alias>'],
     ['u', 'Mở link OAuth (tự lấy từ Clipboard) vào đúng profile', 'gpool auth <alias> [url]'],
     ['x', 'Đặt cooldown (+1h/+5h/+24h/+7d/tùy chỉnh) hoặc gỡ', 'gpool cooldown <alias> 5'],
@@ -949,6 +1036,7 @@ async function fetchSnapshot(paths: PoolPaths, port: number): Promise<TuiSnapsho
       settings: setData.settings ?? accData.settings!,
       events: evData.events,
       agyStatus,
+      agyLease: readAgyLease(paths),
     };
   }
 
@@ -991,6 +1079,7 @@ async function fetchSnapshot(paths: PoolPaths, port: number): Promise<TuiSnapsho
       keepalive: { running: false, sweeping: false, activeProbes: [], lastSweepAt: null },
       settings: db.getSettings(),
       events: db.listEvents(40),
+      agyLease: readAgyLease(paths),
       agyStatus: liveCtx
         ? {
             keychain_present: liveCtx.present,
@@ -1411,63 +1500,87 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
     setNotice(`Đã quay lại TUI sau khi chạy agy (${alias}).`, 'info');
   };
 
-  const doRotateNext = async (cooldownHours: number) => {
-    await runAction('Đang xoay vòng sang tài khoản sẵn sàng kế tiếp...', async () => {
-      let res: { ok: boolean; active?: AccountView; error?: string };
-      if (await isDaemonAlive(port)) {
-        try {
-          res = await callDaemon(port, '/api/pool/next', {
-            method: 'POST',
-            body: JSON.stringify({ cooldownHours, openChrome: true }),
-          });
-        } catch (err) {
-          res = { ok: false, error: err instanceof Error ? err.message : String(err) };
+  const doRotateNext = async (cooldownHours: number, activateAgy = false) => {
+    await runAction(
+      activateAgy ? 'Đang xoay vòng và nạp phiên agy kế tiếp...' : 'Đang xoay vòng sang tài khoản sẵn sàng kế tiếp...',
+      async () => {
+        let res: { ok: boolean; active?: AccountView; agyActivated?: boolean; error?: string };
+        const payload = activateAgy
+          ? { cooldownHours, activateAgy: true, requireAgy: true, openChrome: false }
+          : { cooldownHours, openChrome: true };
+        if (await isDaemonAlive(port)) {
+          try {
+            res = await callDaemon(port, '/api/pool/next', {
+              method: 'POST',
+              body: JSON.stringify(payload),
+            });
+          } catch (err) {
+            res = { ok: false, error: err instanceof Error ? err.message : String(err) };
+          }
+        } else {
+          const db = new PoolDB(paths);
+          try {
+            const sw = new PoolSwitcher({ db, paths });
+            res = await sw.rotateNext(payload);
+          } finally {
+            db.close();
+          }
         }
-      } else {
-        const db = new PoolDB(paths);
-        try {
-          const sw = new PoolSwitcher({ db, paths });
-          res = await sw.rotateNext({ cooldownHours, openChrome: true });
-        } finally {
-          db.close();
+        if (!res.ok || !res.active) {
+          setNotice(res.error ?? 'Không còn tài khoản sẵn sàng.', 'warn');
+        } else if (activateAgy && res.agyActivated) {
+          setNotice(`Đã xoay và nạp phiên agy "${res.active.alias}" vào Keychain!`, 'success');
+        } else {
+          setNotice(`Đã xoay vòng sang "${res.active.alias}" (${res.active.email})!`, 'success');
         }
-      }
-      if (!res.ok || !res.active) {
-        setNotice(res.error ?? 'Không còn tài khoản sẵn sàng.', 'warn');
-      } else {
-        setNotice(`Đã xoay vòng sang "${res.active.alias}" (${res.active.email})!`, 'success');
-      }
-    });
+      },
+    );
   };
 
-  const doCooldown = async (alias: string, hours: number | 'clear') => {
-    await runAction(hours === 'clear' ? `Đang gỡ cooldown ${alias}...` : `Đang đặt cooldown +${hours}h...`, async () => {
-      if (await isDaemonAlive(port)) {
-        if (hours === 'clear') {
-          await callDaemon(port, `/api/accounts/${encodeURIComponent(alias)}/cooldown`, { method: 'DELETE' });
-        } else {
-          await callDaemon(port, `/api/accounts/${encodeURIComponent(alias)}/cooldown`, {
-            method: 'POST',
-            body: JSON.stringify({ hours, reason: `Đặt từ TUI (+${hours}h)` }),
-          });
-        }
-      } else {
-        const db = new PoolDB(paths);
-        try {
+  const doCooldown = async (alias: string, hours: number | 'clear', bucket?: string) => {
+    const bTag = bucket && bucket !== 'all' ? ` [${bucket}]` : '';
+    await runAction(
+      hours === 'clear' ? `Đang gỡ cooldown${bTag} ${alias}...` : `Đang đặt cooldown${bTag} +${hours}h...`,
+      async () => {
+        if (await isDaemonAlive(port)) {
           if (hours === 'clear') {
-            db.clearCooldown(alias);
+            const qs = bucket && bucket !== 'all' ? `?bucket=${encodeURIComponent(bucket)}` : '';
+            await callDaemon(port, `/api/accounts/${encodeURIComponent(alias)}/cooldown${qs}`, { method: 'DELETE' });
           } else {
-            db.setCooldown(alias, new Date(Date.now() + hours * 3_600_000).toISOString(), `Đặt từ TUI (+${hours}h)`);
+            await callDaemon(port, `/api/accounts/${encodeURIComponent(alias)}/cooldown`, {
+              method: 'POST',
+              body: JSON.stringify({
+                hours,
+                reason: `Đặt từ TUI (+${hours}h${bTag})`,
+                ...(bucket && bucket !== 'all' ? { bucket } : {}),
+              }),
+            });
           }
-        } finally {
-          db.close();
+        } else {
+          const db = new PoolDB(paths);
+          try {
+            if (hours === 'clear') {
+              db.clearCooldown(alias, bucket);
+            } else {
+              const untilIso = new Date(Date.now() + hours * 3_600_000).toISOString();
+              if (bucket && bucket !== 'all') {
+                db.setBucketCooldown(alias, bucket, untilIso, `Đặt từ TUI (+${hours}h${bTag})`);
+              } else {
+                db.setCooldown(alias, untilIso, `Đặt từ TUI (+${hours}h)`);
+              }
+            }
+          } finally {
+            db.close();
+          }
         }
-      }
-      setNotice(
-        hours === 'clear' ? `Đã gỡ cooldown cho "${alias}".` : `Đã đặt cooldown +${hours}h cho "${alias}".`,
-        hours === 'clear' ? 'success' : 'warn',
-      );
-    });
+        setNotice(
+          hours === 'clear'
+            ? `Đã gỡ cooldown${bTag} cho "${alias}".`
+            : `Đã đặt cooldown${bTag} +${hours}h cho "${alias}".`,
+          hours === 'clear' ? 'success' : 'warn',
+        );
+      },
+    );
   };
 
   const doCheck = async (alias?: string) => {
@@ -1673,6 +1786,9 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       if (!sel) return;
       if (chosen.id === 'clear') {
         await doCooldown(sel.alias, 'clear');
+      } else if (chosen.id.startsWith('bucket:')) {
+        const [, bName, bHours] = chosen.id.split(':');
+        await doCooldown(sel.alias, Number(bHours), bName);
       } else if (chosen.id === 'custom') {
         state.modal = {
           type: 'input',
@@ -2084,6 +2200,35 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
         }
         return;
       }
+
+      if (m.type === 'agy-health') {
+        if (str === 'U' || str === 'u') {
+          void runAction('Đang mở khóa agy.lock...', async () => {
+            if (await isDaemonAlive(port)) {
+              await callDaemon(port, '/api/agy/lease', { method: 'DELETE' });
+            } else {
+              releaseAgyLease(paths, { force: true });
+            }
+            const rep = (await isDaemonAlive(port))
+              ? await callDaemon<AgyHealthReport>(port, '/api/agy/health')
+              : (() => {
+                  const db = new PoolDB(paths);
+                  try {
+                    const s = db.getSettings();
+                    return inspectAgyHealth(paths, db.listAccounts(), db.getRenewalAlerts(s.renewal_alert_days));
+                  } finally {
+                    db.close();
+                  }
+                })();
+            state.modal = { type: 'agy-health', report: rep };
+            setNotice('Đã mở khóa agy.lock.', 'success');
+          });
+        } else if (str === 'q' || key.name === 'return') {
+          state.modal = null;
+          draw();
+        }
+        return;
+      }
       return;
     }
 
@@ -2204,6 +2349,30 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           : getAgySessionStatus(paths);
         state.modal = { type: 'agy-status', status: st };
       });
+      return;
+    }
+
+    if (str === 'H') {
+      void runAction('Đang kiểm tra sức khỏe các snapshot agy...', async () => {
+        const rep = (await isDaemonAlive(port))
+          ? await callDaemon<AgyHealthReport>(port, '/api/agy/health')
+          : (() => {
+              const db = new PoolDB(paths);
+              try {
+                const s = db.getSettings();
+                return inspectAgyHealth(paths, db.listAccounts(), db.getRenewalAlerts(s.renewal_alert_days));
+              } finally {
+                db.close();
+              }
+            })();
+        state.modal = { type: 'agy-health', report: rep };
+      });
+      return;
+    }
+
+    if (str === 'N') {
+      const defCd = state.snapshot?.settings.default_cooldown_hours ?? 5;
+      void doRotateNext(defCd, true);
       return;
     }
 
@@ -2331,12 +2500,13 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
         subtitle: sel.cooldown_remaining_ms > 0 ? `Hiện còn: ${formatShortDuration(sel.cooldown_remaining_ms)}` : 'Hiện không có cooldown',
         cursor: 0,
         items: [
-          { id: String(defH), label: `1. +${defH} giờ (mặc định)` },
-          { id: '1', label: '2. +1 giờ' },
-          { id: '24', label: '3. +24 giờ (1 ngày)' },
-          { id: '168', label: '4. +168 giờ (7 ngày)' },
-          { id: 'custom', label: '5. Nhập số giờ tùy chỉnh...' },
-          { id: 'clear', label: '6. Gỡ cooldown ngay (clear)' },
+          { id: String(defH), label: `1. +${defH} giờ toàn acc (mặc định)` },
+          { id: '1', label: '2. +1 giờ toàn acc' },
+          { id: '24', label: '3. +24 giờ toàn acc (1 ngày)' },
+          { id: `bucket:pro:${defH}`, label: `4. +${defH} giờ riêng bucket [pro]` },
+          { id: `bucket:claude:${defH}`, label: `5. +${defH} giờ riêng bucket [claude]` },
+          { id: 'custom', label: '6. Nhập số giờ tùy chỉnh...' },
+          { id: 'clear', label: '7. Gỡ toàn bộ cooldown (clear)' },
         ],
       };
       draw();

@@ -30,6 +30,7 @@
             </div>
           </div>
           <div class="action-group">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-agy-health">Sức khỏe agy</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-sweep">Quét phiên</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-import-chrome">Nhập Chrome</button>
             <button type="button" class="btn btn-primary btn-sm" id="btn-add-account">+ Thêm</button>
@@ -54,6 +55,8 @@
               <div class="hero-eyebrow-row">
                 <span class="hero-eyebrow">TÀI KHOẢN ĐANG CHỌN</span>
                 <span class="badge badge-neutral" id="hero-agy-keychain" hidden></span>
+                <span class="badge badge-cooldown" id="hero-agy-lease" hidden></span>
+                <span class="badge badge-danger" id="hero-renewal-alert" hidden></span>
               </div>
               <div class="hero-title-row">
                 <h2 id="active-alias">Chưa chọn tài khoản</h2>
@@ -67,8 +70,11 @@
             </div>
 
             <div class="hero-buttons">
-              <button type="button" class="btn btn-warning" id="btn-rotate-next" disabled>
-                Hết quota (+5h) → Đổi acc kế tiếp
+              <button type="button" class="btn btn-warning" id="btn-rotate-agy-next" disabled title="Đặt cooldown acc hiện tại, chọn acc đã lưu agy kế tiếp và nạp thẳng vào Keychain (không bật Chrome)">
+                Xoay agy kế (+5h)
+              </button>
+              <button type="button" class="btn btn-secondary" id="btn-rotate-next" disabled title="Đặt cooldown acc hiện tại và mở Chrome acc kế tiếp">
+                Đổi Chrome kế
               </button>
               <button type="button" class="btn btn-secondary" id="btn-active-agy" disabled>
                 Nạp phiên agy
@@ -437,6 +443,18 @@
               <span>Cooldown mặc định khi hết quota (giờ)</span>
               <input type="number" id="set-cooldown-hours" min="0.25" max="720" step="0.25" />
             </label>
+            <label>
+              <span>Chiến lược xoay vòng tài khoản</span>
+              <select id="set-rotation-policy">
+                <option value="lru">LRU — Ít dùng gần đây nhất (mặc định)</option>
+                <option value="round-robin">Round-Robin — Chia đều lượt sử dụng</option>
+                <option value="tier-first">Ưu tiên gói cao (Enterprise → Ultra → Pro)</option>
+              </select>
+            </label>
+            <label>
+              <span>Cảnh báo ngày gia hạn trước (ngày)</span>
+              <input type="number" id="set-renewal-alert-days" min="1" max="90" />
+            </label>
             <label class="checkbox-row full-span">
               <input type="checkbox" id="set-notify" />
               <span>Gửi thông báo macOS khi phát hiện tài khoản bị mất phiên</span>
@@ -490,6 +508,32 @@
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-close-modal="delete-modal">Hủy</button>
             <button type="button" class="btn btn-danger" id="btn-confirm-delete">Xóa tài khoản</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal Sức khỏe phiên agy & Cảnh báo gia hạn -->
+    <div class="modal-backdrop" id="agy-health-modal" hidden>
+      <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="agy-health-title">
+        <div class="modal-header">
+          <h3 id="agy-health-title">Sức khỏe phiên agy &amp; Khóa agy.lock</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="agy-health-modal" aria-label="Đóng">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="health-summary-bar" id="health-summary-bar"></div>
+          <div class="notice-box" id="health-lease-box" hidden>
+            <p id="health-lease-text"></p>
+            <button type="button" class="btn btn-danger btn-sm" id="btn-unlock-lease">Mở khóa agy.lock</button>
+          </div>
+          <div class="health-list" id="health-list"></div>
+          <div class="notice-box" id="health-renewals-box" hidden>
+            <strong>Cảnh báo ngày gia hạn gói:</strong>
+            <div id="health-renewals-list"></div>
+          </div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="btn-refresh-health">Kiểm tra lại</button>
+            <button type="button" class="btn btn-primary" data-close-modal="agy-health-modal">Đóng</button>
           </div>
         </div>
       </div>
