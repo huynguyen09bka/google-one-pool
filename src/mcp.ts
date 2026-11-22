@@ -9,6 +9,7 @@ import {
   sessionInfoForAlias,
   type AgySessionDeps,
 } from './agysession.ts';
+import { computePoolAnalytics } from './analytics.ts';
 import { isAccountChromeRunning } from './chrome.ts';
 import { DEFAULT_HOST, validateBucketName, validateRotationPolicy, type PoolPaths } from './config.ts';
 import { PoolDB } from './db.ts';
@@ -164,6 +165,18 @@ const MCP_TOOLS: McpToolDefinition[] = [
         force: { type: 'boolean', description: 'Bỏ qua kiểm tra tiến trình agy đang chạy.' },
       },
       required: ['args'],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: 'pool_analytics',
+    description:
+      'Xem thống kê hiệu suất & lịch sử sử dụng pool trong N ngày gần đây (tỷ lệ sẵn sàng, lượt switch/nạp agy, số lần đụng quota theo ngày và theo từng tài khoản, tỷ lệ mã hóa snapshot).',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        days: { type: 'number', description: 'Số ngày thống kê (1–30, mặc định 7).' },
+      },
       additionalProperties: false,
     },
   },
@@ -463,6 +476,11 @@ export function createMcpHandler(options: McpHandlerOptions) {
         });
         if (shouldNotifyDaemon) void pingDaemonSync(port);
         return result;
+      }
+
+      if (name === 'pool_analytics') {
+        const days = typeof args.days === 'number' && Number.isFinite(args.days) ? args.days : 7;
+        return { ok: true, ...computePoolAnalytics(db, paths, { days }) };
       }
 
       throw new Error(`Tool không tồn tại: "${name}"`);

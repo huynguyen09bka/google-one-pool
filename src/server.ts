@@ -8,16 +8,22 @@ import {
   getDefaultBrowserRoots,
   type BrowserScanRoot,
 } from './browser-import.ts';
+import { decryptBackupBundle, encryptBackupBundle, isEncryptedBackupBundle } from './agycrypto.ts';
 import { readAgyLease, releaseAgyLease } from './agylock.ts';
 import {
   activateAgySession,
   captureAgySession,
+  exportDecryptedSessions,
   getAgySessionStatus,
   getLiveKeychainContext,
+  importSessionsFromBackup,
   inspectAgyHealth,
+  migrateSessionsToEncrypted,
   sessionInfoForAlias,
+  type AgySessionSnapshot,
   type LiveKeychainContext,
 } from './agysession.ts';
+import { computePoolAnalytics } from './analytics.ts';
 import { isAccountChromeRunning } from './chrome.ts';
 import { DEFAULT_HOST, DEFAULT_PORT, validateAlias, validateEmail, type PoolPaths } from './config.ts';
 import type { PoolDB } from './db.ts';
@@ -29,6 +35,7 @@ import type {
   CreateAccountInput,
   DaemonSettings,
   EffectiveState,
+  EncryptedBackupBundle,
   PlanTier,
   PoolExportPayload,
   ProfileMode,
@@ -525,6 +532,82 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
         return;
       }
 
+      if (method === 'POST' && pathname === '/api/agy/encrypt') {
+        try {
+          const result = migrateSessionsToEncrypted(options.paths);
+          if (result.encrypted.length > 0) {
+            options.db.addEvent(
+              null,
+              null,
+              'agy_sessions_encrypted',
+              `Đã mã hóa AES-256-GCM cho ${result.encrypted.length} phiên agy`,
+            );
+            broadcast('state_changed', buildSnapshot());
+          }
+          sendJson(res, 200, result);
+          return;
+        } catch (err) {
+          throw new HttpError(400, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      if (method === 'GET' && pathname === '/api/analytics') {
+        const daysRaw = url.searchParams.get('days');
+        const days = daysRaw ? Number(daysRaw) : 7;
+        const report = computePoolAnalytics(options.db, options.paths, {
+          days: Number.isFinite(days) ? days : 7,
+        });
+        sendJson(res, 200, { ok: true, ...report });
+        return;
+      }
+
+      if (method === 'POST' && pathname === '/api/export/encrypted') {
+        const body = await readJsonBody<{ passphrase?: string; withSessions?: boolean }>(req);
+        try {
+          const withSessions = Boolean(body.withSessions);
+          const metadata = options.db.exportMetadata();
+          const sessions = withSessions ? exportDecryptedSessions(options.paths) : [];
+          const bundle = encryptBackupBundle({ metadata, agy_sessions: sessions }, body.passphrase ?? '', withSessions);
+          sendJson(res, 200, { ok: true, bundle, sessions_count: sessions.length });
+          return;
+        } catch (err) {
+          throw new HttpError(400, err instanceof Error ? err.message : String(err));
+        }
+      }
+
+      if (method === 'POST' && pathname === '/api/import/encrypted') {
+        const body = await readJsonBody<{ passphrase?: string; bundle?: EncryptedBackupBundle }>(req);
+        try {
+          if (!isEncryptedBackupBundle(body.bundle)) {
+            throw new Error('Payload thiếu file backup mã hóa hợp lệ.');
+          }
+          const decrypted = decryptBackupBundle<{
+            metadata: PoolExportPayload;
+            agy_sessions?: AgySessionSnapshot[];
+          }>(body.bundle, body.passphrase ?? '');
+          const metaRes = options.db.importMetadata(decrypted.metadata);
+          let sessionsImported = 0;
+          let sessionsEncrypted = 0;
+          if (Array.isArray(decrypted.agy_sessions) && decrypted.agy_sessions.length > 0) {
+            const sesRes = importSessionsFromBackup(options.paths, decrypted.agy_sessions, {
+              encrypt: process.platform === 'darwin',
+            });
+            sessionsImported = sesRes.imported;
+            sessionsEncrypted = sesRes.encrypted;
+          }
+          broadcast('state_changed', buildSnapshot());
+          sendJson(res, 200, {
+            ok: true,
+            ...metaRes,
+            sessions_imported: sessionsImported,
+            sessions_encrypted: sessionsEncrypted,
+          });
+          return;
+        } catch (err) {
+          throw new HttpError(400, err instanceof Error ? err.message : String(err));
+        }
+      }
+
       if (method === 'GET' && pathname === '/api/settings') {
         sendJson(res, 200, { settings: options.db.getSettings() });
         return;
@@ -744,12 +827,14 @@ export function createDaemonServer(options: CreateDaemonServerOptions): DaemonSe
           const account = options.db.getAccount(aliasParam);
           if (!account) throw new HttpError(404, `Không tìm thấy tài khoản "${aliasParam}".`);
           try {
-            const result = captureAgySession(options.paths, account);
+            const result = captureAgySession(options.paths, account, {
+              encrypt: process.platform === 'darwin',
+            });
             options.db.addEvent(
               account.id,
               account.alias,
               'agy_session_captured',
-              `Đã lưu phiên đăng nhập agy của ${account.alias}`,
+              `Đã lưu phiên đăng nhập agy của ${account.alias}${result.encrypted ? ' (AES-256-GCM)' : ''}`,
             );
             broadcast('state_changed', buildSnapshot());
             sendJson(res, 200, result);

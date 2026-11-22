@@ -2,20 +2,27 @@ import { execFile, spawn } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
 import readline from 'node:readline/promises';
+import { decryptBackupBundle, encryptBackupBundle, isEncryptedBackupBundle } from './agycrypto.ts';
 import { readAgyLease, releaseAgyLease } from './agylock.ts';
+import { runAgyOnboardWizard } from './agy-onboard.ts';
 import { runAgyWithFailover } from './agy-runner.ts';
 import {
   activateAgySession,
   captureAgySession,
+  exportDecryptedSessions,
   getAgySessionStatus,
   getLiveKeychainContext,
   hasSessionSnapshot,
+  importSessionsFromBackup,
   inspectAgyHealth,
+  migrateSessionsToEncrypted,
   sessionInfoForAlias,
   type AgyActivateResult,
   type AgyCaptureResult,
+  type AgySessionSnapshot,
   type AgyStatusResult,
 } from './agysession.ts';
+import { computePoolAnalytics } from './analytics.ts';
 import {
   discoverBrowserProfiles,
   extractEmailsFromText,
@@ -41,12 +48,15 @@ import { PoolSwitcher } from './switcher.ts';
 import { runTui } from './tui.ts';
 import type {
   AccountView,
+  AgyEncryptMigrationResult,
   AgyHealthReport,
   AgyLeaseInfo,
   BulkImportItemInput,
   BulkImportResult,
   EffectiveState,
+  EncryptedBackupBundle,
   PlanTier,
+  PoolAnalyticsReport,
   PoolExportPayload,
   ProfileMode,
   RotationPolicy,
@@ -180,6 +190,16 @@ export async function runCli(argv: string[]): Promise<number> {
       case 'agy-lock':
         return await handleAgyLock(rest, paths, port, asJson);
 
+      case 'agy-encrypt':
+        return await handleAgyEncrypt(paths, port, asJson);
+
+      case 'agy-onboard':
+        return await handleAgyOnboard(rest, parsed.flags, paths, port);
+
+      case 'stats':
+      case 'analytics':
+        return await handleStats(parsed.flags, paths, port, asJson);
+
       case 'mcp':
         return await runMcpServer({ paths, port });
 
@@ -199,10 +219,10 @@ export async function runCli(argv: string[]): Promise<number> {
         return await handleLaunchAgent(rest, paths, port, asJson);
 
       case 'export':
-        return await handleExport(rest, paths, port);
+        return await handleExport(rest, parsed.flags, paths, port);
 
       case 'import':
-        return await handleImport(rest, paths, port, asJson);
+        return await handleImport(rest, parsed.flags, paths, port, asJson);
 
       default:
         throw new Error(`Lệnh không hợp lệ: "${cmd}". Chạy "gpool help" để xem hướng dẫn.`);
@@ -841,8 +861,12 @@ async function handleAgyHealth(paths: PoolPaths, port: number, asJson: boolean):
 
   console.log(
     `Sức khỏe phiên agy: ${report.summary.healthy} khỏe mạnh • ${report.summary.needs_refresh} chờ refresh • ` +
-      `${report.summary.missing_snapshot} chưa lưu • ${report.summary.issues} lỗi`,
+      `${report.summary.missing_snapshot} chưa lưu • ${report.summary.issues} lỗi • ` +
+      `Mã hóa AES-256-GCM: ${report.summary.encrypted}/${report.summary.encrypted + report.summary.unencrypted}`,
   );
+  if (report.summary.unencrypted > 0) {
+    console.log(`Gợi ý: Có ${report.summary.unencrypted} snapshot chưa mã hóa — chạy "gpool agy-encrypt" để bảo vệ bằng AES-256-GCM.`);
+  }
   console.log(
     `Keychain hiện tại: ${report.live_owner_alias ?? (report.keychain_present ? 'có phiên (chưa khớp pool)' : 'trống')}` +
       (report.running_clients.length > 0 ? ` • Đang chạy: ${report.running_clients.join(', ')}` : ''),
@@ -906,6 +930,133 @@ async function handleAgyLock(args: string[], paths: PoolPaths, port: number, asJ
   throw new Error('Cú pháp: gpool agy-lock <status|unlock> [--json]');
 }
 
+async function handleAgyEncrypt(paths: PoolPaths, port: number, asJson: boolean): Promise<number> {
+  let res: AgyEncryptMigrationResult;
+  if (await isDaemonAlive(port)) {
+    res = await callDaemon<AgyEncryptMigrationResult>(port, '/api/agy/encrypt', { method: 'POST' });
+  } else {
+    res = migrateSessionsToEncrypted(paths);
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify(res, null, 2));
+    return res.failed.length > 0 ? 1 : 0;
+  }
+
+  console.log(
+    `Mã hóa kho phiên agy (AES-256-GCM + macOS Keychain master key): ` +
+      `mới mã hóa ${res.encrypted.length}, đã mã hóa sẵn ${res.already_encrypted.length}, lỗi ${res.failed.length}.`,
+  );
+  if (res.encrypted.length > 0) {
+    console.log(`  Đã nâng cấp: ${res.encrypted.join(', ')}`);
+  }
+  for (const f of res.failed) {
+    console.error(`  Lỗi (${f.alias}): ${f.error}`);
+  }
+  return res.failed.length > 0 ? 1 : 0;
+}
+
+async function handleAgyOnboard(
+  args: string[],
+  flags: Map<string, string | boolean>,
+  paths: PoolPaths,
+  port: number,
+): Promise<number> {
+  const alias = args[0] ?? getStrFlag(flags, 'alias');
+  const includeAll = Boolean(flags.get('all'));
+  const timeoutRaw = getStrFlag(flags, 'timeout');
+  const loginCmdRaw = getStrFlag(flags, 'login-cmd');
+
+  let loginCommand: { bin: string; args: string[] } | null = null;
+  if (loginCmdRaw && loginCmdRaw.trim()) {
+    const parts = loginCmdRaw.trim().split(/\s+/);
+    loginCommand = { bin: parts[0], args: parts.slice(1) };
+  }
+
+  const db = new PoolDB(paths);
+  try {
+    await runAgyOnboardWizard({
+      db,
+      paths,
+      alias,
+      includeAll,
+      loginCommand,
+      timeoutSeconds: timeoutRaw ? Number(timeoutRaw) : 180,
+      onAccountCaptured: async () => {
+        if (await isDaemonAlive(port)) {
+          await fetch(`http://${DEFAULT_HOST}:${port}/api/sync`, { method: 'POST' }).catch(() => {});
+        }
+      },
+    });
+  } finally {
+    db.close();
+  }
+  return 0;
+}
+
+async function handleStats(
+  flags: Map<string, string | boolean>,
+  paths: PoolPaths,
+  port: number,
+  asJson: boolean,
+): Promise<number> {
+  const daysRaw = getStrFlag(flags, 'days');
+  const days = daysRaw ? Number(daysRaw) : 7;
+
+  let report: PoolAnalyticsReport;
+  if (await isDaemonAlive(port)) {
+    report = await callDaemon<PoolAnalyticsReport>(port, `/api/analytics?days=${encodeURIComponent(String(days))}`);
+  } else {
+    const db = new PoolDB(paths);
+    try {
+      report = computePoolAnalytics(db, paths, { days });
+    } finally {
+      db.close();
+    }
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify({ ok: true, ...report }, null, 2));
+    return 0;
+  }
+
+  const s = report.summary;
+  console.log(`=== Thống kê & Hiệu suất Pool (${report.window_days} ngày gần đây) ===`);
+  console.log(
+    `Sẵn sàng: ${s.ready_accounts}/${s.total_accounts} (${s.availability_percent}%)  •  ` +
+      `Cooldown: ${s.cooldown_accounts}  •  Cần login: ${s.needs_login_accounts}`,
+  );
+  console.log(
+    `Phiên agy đã lưu: ${s.agy_captured_accounts}/${s.total_accounts} (Mã hóa AES-256: ${s.agy_encrypted_accounts})`,
+  );
+  console.log(
+    `Tổng lượt switch: ${s.total_switches}  •  Lượt nạp agy: ${s.total_agy_activations}  •  ` +
+      `Đụng quota (${report.window_days}n / tổng): ${s.quota_hits_window} / ${s.quota_hits_total}` +
+      (s.switches_per_quota_hit !== null ? `  •  TB ${s.switches_per_quota_hit} lượt/quota hit` : ''),
+  );
+
+  console.log('\nHoạt động theo ngày (Switch + Nạp agy | Đụng quota):');
+  const maxVal = Math.max(1, ...report.daily.map((d) => d.switches + d.agy_activations + d.quota_hits));
+  for (const d of report.daily) {
+    const ops = d.switches + d.agy_activations;
+    const barLen = Math.round((ops / maxVal) * 24);
+    const bar = '█'.repeat(barLen) + '░'.repeat(Math.max(0, 24 - barLen));
+    const qBar = d.quota_hits > 0 ? `  [quota: ${'▲'.repeat(Math.min(10, d.quota_hits))} ${d.quota_hits}]` : '';
+    console.log(`  ${d.date.slice(5)}  ${bar}  ${String(ops).padStart(3)} lượt${qBar}`);
+  }
+
+  if (report.accounts.length > 0) {
+    console.log(`\n  ${pad('ALIAS', 18)} ${pad('GÓI', 16)} ${pad('LƯỢT DÙNG', 10)} ${pad('QUOTA(7N)', 10)} ${pad('MÃ HÓA', 10)} TRẠNG THÁI`);
+    for (const a of report.accounts) {
+      const encTxt = !a.agy_captured ? '-' : a.agy_encrypted ? 'AES-256' : 'plain';
+      console.log(
+        `  ${pad(a.alias, 18)} ${pad(a.plan_tier, 16)} ${pad(String(a.use_count), 10)} ${pad(String(a.quota_hits_window), 10)} ${pad(encTxt, 10)} ${a.effective_state}`,
+      );
+    }
+  }
+  return 0;
+}
+
 async function handleAuth(
   args: string[],
   paths: PoolPaths,
@@ -963,8 +1114,13 @@ async function handleAgyCapture(args: string[], paths: PoolPaths, port: number, 
     try {
       const account = db.getAccount(alias);
       if (!account) throw new Error(`Không tìm thấy tài khoản "${alias}".`);
-      res = captureAgySession(paths, account);
-      db.addEvent(account.id, account.alias, 'agy_session_captured', `Đã lưu phiên đăng nhập agy của ${account.alias}`);
+      res = captureAgySession(paths, account, { encrypt: process.platform === 'darwin' });
+      db.addEvent(
+        account.id,
+        account.alias,
+        'agy_session_captured',
+        `Đã lưu phiên đăng nhập agy của ${account.alias}${res.encrypted ? ' (AES-256-GCM)' : ''}`,
+      );
     } finally {
       db.close();
     }
@@ -1840,8 +1996,72 @@ async function handleLaunchAgent(
   throw new Error('Cú pháp: gpool launchagent <install|uninstall|status>');
 }
 
-async function handleExport(args: string[], paths: PoolPaths, port: number): Promise<number> {
+async function promptPassphrase(promptText: string): Promise<string> {
+  if (!process.stdin.isTTY) {
+    throw new Error('Cần truyền --passphrase "<mật khẩu>" khi chạy ở chế độ không tương tác.');
+  }
+  const rl = readline.createInterface({ input: process.stdin, output: process.stderr });
+  try {
+    const ans = await rl.question(promptText);
+    return ans.trim();
+  } finally {
+    rl.close();
+  }
+}
+
+async function handleExport(
+  args: string[],
+  flags: Map<string, string | boolean>,
+  paths: PoolPaths,
+  port: number,
+): Promise<number> {
   const [outFile] = args;
+  const withSessions = Boolean(flags.get('with-sessions'));
+  const encrypted = Boolean(flags.get('encrypted')) || withSessions;
+
+  if (encrypted) {
+    const passphrase =
+      getStrFlag(flags, 'passphrase') ??
+      (await promptPassphrase('Nhập mật khẩu mã hóa backup (>= 6 ký tự): '));
+
+    let bundle: EncryptedBackupBundle;
+    let sessionsCount = 0;
+    if (await isDaemonAlive(port)) {
+      const res = await callDaemon<{ ok: boolean; bundle: EncryptedBackupBundle; sessions_count: number }>(
+        port,
+        '/api/export/encrypted',
+        {
+          method: 'POST',
+          body: JSON.stringify({ passphrase, withSessions }),
+        },
+      );
+      bundle = res.bundle;
+      sessionsCount = res.sessions_count;
+    } else {
+      const db = new PoolDB(paths);
+      try {
+        const metadata = db.exportMetadata();
+        const sessions = withSessions ? exportDecryptedSessions(paths) : [];
+        sessionsCount = sessions.length;
+        bundle = encryptBackupBundle({ metadata, agy_sessions: sessions }, passphrase, withSessions);
+      } finally {
+        db.close();
+      }
+    }
+
+    const text = JSON.stringify(bundle, null, 2);
+    if (outFile) {
+      fs.writeFileSync(outFile, text, { encoding: 'utf8', mode: 0o600 });
+      console.log(
+        `Đã xuất backup mã hóa AES-256-GCM ra ${outFile}` +
+          (withSessions ? ` (kèm ${sessionsCount} phiên agy).` : ' (chỉ metadata).'),
+      );
+    } else {
+      console.log(text);
+    }
+    return 0;
+  }
+
   let payload: PoolExportPayload;
   if (await isDaemonAlive(port)) {
     payload = await callDaemon<PoolExportPayload>(port, '/api/export');
@@ -1865,14 +2085,62 @@ async function handleExport(args: string[], paths: PoolPaths, port: number): Pro
 
 async function handleImport(
   args: string[],
+  flags: Map<string, string | boolean>,
   paths: PoolPaths,
   port: number,
   asJson: boolean,
 ): Promise<number> {
   const [inFile] = args;
-  if (!inFile) throw new Error('Cú pháp: gpool import <file.json>');
-  const payload = JSON.parse(fs.readFileSync(inFile, 'utf8')) as PoolExportPayload;
+  if (!inFile) throw new Error('Cú pháp: gpool import <file.json> [--passphrase "..."]');
+  const rawObj = JSON.parse(fs.readFileSync(inFile, 'utf8')) as unknown;
 
+  if (isEncryptedBackupBundle(rawObj)) {
+    const passphrase =
+      getStrFlag(flags, 'passphrase') ??
+      (await promptPassphrase('Nhập mật khẩu giải mã file backup: '));
+
+    let res: { created: number; updated: number; sessions_imported: number; sessions_encrypted: number };
+    if (await isDaemonAlive(port)) {
+      res = await callDaemon(port, '/api/import/encrypted', {
+        method: 'POST',
+        body: JSON.stringify({ passphrase, bundle: rawObj }),
+      });
+    } else {
+      const decrypted = decryptBackupBundle<{
+        metadata: PoolExportPayload;
+        agy_sessions?: AgySessionSnapshot[];
+      }>(rawObj, passphrase);
+      const db = new PoolDB(paths);
+      try {
+        const metaRes = db.importMetadata(decrypted.metadata);
+        let sessionsImported = 0;
+        let sessionsEncrypted = 0;
+        if (Array.isArray(decrypted.agy_sessions) && decrypted.agy_sessions.length > 0) {
+          const sesRes = importSessionsFromBackup(paths, decrypted.agy_sessions, {
+            encrypt: process.platform === 'darwin',
+          });
+          sessionsImported = sesRes.imported;
+          sessionsEncrypted = sesRes.encrypted;
+        }
+        res = { ...metaRes, sessions_imported: sessionsImported, sessions_encrypted: sessionsEncrypted };
+      } finally {
+        db.close();
+      }
+    }
+
+    if (asJson) console.log(JSON.stringify({ ok: true, ...res }, null, 2));
+    else {
+      console.log(
+        `Đã khôi phục backup mã hóa: thêm ${res.created}, cập nhật ${res.updated} tài khoản` +
+          (res.sessions_imported > 0
+            ? `, khôi phục ${res.sessions_imported} phiên agy (${res.sessions_encrypted} đã mã hóa AES-256-GCM).`
+            : '.'),
+      );
+    }
+    return 0;
+  }
+
+  const payload = rawObj as PoolExportPayload;
   let res: { created: number; updated: number };
   if (await isDaemonAlive(port)) {
     res = await callDaemon<{ created: number; updated: number }>(port, '/api/import', {
@@ -1942,7 +2210,9 @@ function isBooleanFlag(key: string): boolean {
     key === 'force' ||
     key === 'agy' ||
     key === 'auto-rotate' ||
-    key === 'interactive'
+    key === 'interactive' ||
+    key === 'encrypted' ||
+    key === 'with-sessions'
   );
 }
 
@@ -2048,7 +2318,10 @@ Phiên agy CLI (Auto-Failover, Keychain & MCP):
   gpool agy-activate <alias> [--force]  Nạp phiên đã lưu vào Keychain — đổi acc agy không cần login lại
   gpool agy-status                      Xem phiên keychain hiện tại thuộc acc nào + các snapshot đã lưu
   gpool agy-health [--json]             Kiểm tra sức khỏe toàn bộ snapshot agy + cảnh báo ngày gia hạn
+  gpool agy-encrypt [--json]            Mã hóa toàn bộ snapshot agy trên đĩa bằng AES-256-GCM (Keychain master key)
+  gpool agy-onboard [--alias <a>|--all] Wizard 1/N tự bắt link OAuth mở đúng Chrome & tự động capture phiên agy
   gpool agy-lock <status|unlock>        Xem hoặc mở khóa agy.lock (chống xung đột Keychain giữa nhiều agent)
+  gpool stats [--days 7] [--json]       Xem biểu đồ hiệu suất pool, lượt xoay vòng & tỷ lệ đụng quota
   gpool run <alias> -- agy              Tự nạp phiên đã lưu rồi chạy agy (với CLI khác: ADC / GEMINI_CLI_HOME)
   gpool mcp                             Chạy MCP Server (stdio) cho AI Agents (Devin/Claude/Codex/Cursor)
 
@@ -2057,8 +2330,8 @@ Daemon, Web Dashboard & macOS:
   gpool dashboard                       Khởi động daemon nếu cần và mở Web Dashboard
   gpool menubar <build|start|stop>      Build và mở app Menu Bar gốc trên macOS
   gpool launchagent <install|uninstall|status>  Tự chạy daemon khi mở máy macOS
-  gpool export [file.json]              Xuất metadata tài khoản (không xuất cookie)
-  gpool import <file.json>              Nhập metadata tài khoản từ file JSON
+  gpool export [file] [--encrypted] [--with-sessions]  Xuất metadata hoặc backup mã hóa (kèm phiên agy)
+  gpool import <file> [--passphrase "..."]             Khôi phục metadata hoặc backup mã hóa từ file
 
 Tài liệu chi tiết: docs/CLI-GUIDE.md (hoặc chạy "gpool help <tên-lệnh>").`);
 }
@@ -2202,7 +2475,19 @@ Ví dụ:
   gpool agy-next --cooldown 5 --bucket claude --policy tier-first`,
 
   'agy-health': `gpool agy-health [--json]
-Kiểm tra sức khỏe toàn bộ snapshot agy (refresh_token, hạn access_token, khớp email, acc chưa capture), trạng thái khóa agy.lock và cảnh báo các tài khoản sắp đến ngày gia hạn gói.`,
+Kiểm tra sức khỏe toàn bộ snapshot agy (refresh_token, hạn access_token, khớp email, trạng thái mã hóa AES-256-GCM, acc chưa capture), trạng thái khóa agy.lock và cảnh báo các tài khoản sắp đến ngày gia hạn gói.`,
+
+  'agy-encrypt': `gpool agy-encrypt [--json]
+Tạo 1 master key AES-256 duy nhất trong macOS Keychain ("google-one-pool"/"master-key") và mã hóa toàn bộ snapshot agy v1 hiện có trên đĩa sang định dạng v2 AES-256-GCM (kèm AAD gắn với alias).`,
+
+  'agy-onboard': `gpool agy-onboard [alias] [--all] [--timeout <giây>] [--login-cmd "<lệnh>"]
+Wizard 1/N nạp nhanh nhiều tài khoản mới vào agy:
+  - Tự động theo dõi Clipboard (và stdout nếu có --login-cmd) để bắt link OAuth Google
+  - Tự mở link OAuth đó thẳng vào đúng Chrome profile của từng tài khoản (gắn sẵn login_hint/authuser)
+  - Tự theo dõi macOS Keychain và tự động capture (mã hóa AES-256-GCM) ngay khi bạn bấm Allow xong!`,
+
+  stats: `gpool stats (alias: analytics) [--days 7] [--json]
+Hiển thị thống kê hiệu suất toàn pool: tỷ lệ sẵn sàng, độ phủ mã hóa AES-256-GCM, biểu đồ hoạt động N ngày gần đây (lượt switch/nạp agy vs số lần đụng quota) và bảng chi tiết từng tài khoản.`,
 
   'agy-lock': `gpool agy-lock <status|unlock> [--json]
 Xem tiến trình/agent nào đang giữ khóa agy.lock hoặc ép mở khóa (unlock) nếu cần.`,

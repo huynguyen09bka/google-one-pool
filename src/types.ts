@@ -43,6 +43,7 @@ export interface AgyHealthEntry {
   email: string;
   plan_tier: PlanTier;
   captured: boolean;
+  encrypted: boolean;
   captured_at: string | null;
   detected_email: string | null;
   email_matches: boolean;
@@ -75,10 +76,73 @@ export interface AgyHealthReport {
     needs_refresh: number;
     missing_snapshot: number;
     issues: number;
+    encrypted: number;
+    unencrypted: number;
     renewal_alerts: number;
   };
   accounts: AgyHealthEntry[];
   renewal_alerts: RenewalAlert[];
+}
+
+export interface EncryptedBackupBundle {
+  format: 'gpool-encrypted-backup';
+  version: 1;
+  kdf: 'scrypt';
+  alg: 'aes-256-gcm';
+  salt_b64: string;
+  iv_b64: string;
+  tag_b64: string;
+  includes_sessions: boolean;
+  exported_at: string;
+  ciphertext_b64: string;
+}
+
+export interface AgyEncryptMigrationResult {
+  ok: true;
+  encrypted: string[];
+  already_encrypted: string[];
+  failed: Array<{ alias: string; error: string }>;
+}
+
+export interface DailyActivityPoint {
+  date: string;
+  switches: number;
+  agy_activations: number;
+  quota_hits: number;
+}
+
+export interface AccountAnalyticsRow {
+  alias: string;
+  email: string;
+  plan_tier: PlanTier;
+  effective_state: EffectiveState;
+  use_count: number;
+  quota_hits_window: number;
+  quota_hits_total: number;
+  agy_captured: boolean;
+  agy_encrypted: boolean;
+  last_used_at: string | null;
+}
+
+export interface PoolAnalyticsReport {
+  generated_at: string;
+  window_days: number;
+  summary: {
+    total_accounts: number;
+    ready_accounts: number;
+    cooldown_accounts: number;
+    needs_login_accounts: number;
+    agy_captured_accounts: number;
+    agy_encrypted_accounts: number;
+    availability_percent: number;
+    total_switches: number;
+    total_agy_activations: number;
+    quota_hits_window: number;
+    quota_hits_total: number;
+    switches_per_quota_hit: number | null;
+  };
+  daily: DailyActivityPoint[];
+  accounts: AccountAnalyticsRow[];
 }
 
 export interface AccountRecord {

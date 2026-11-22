@@ -99,7 +99,11 @@ gpool agy                       # Chạy agy có khóa agy.lock + tự chọn ac
 gpool agy --bucket auto -- -p "Tác vụ..."  # Tự bắt lỗi quota, đặt cooldown & failover xoay acc
 gpool agy-next                  # Đổi acc agy kế tiếp + nạp thẳng Keychain trong 1 lệnh
 gpool agy-activate <alias>      # Nạp phiên agy của 1 acc cụ thể
-gpool agy-health                # Kiểm tra sức khỏe snapshot agy + cảnh báo ngày gia hạn
+gpool agy-health                # Kiểm tra sức khỏe snapshot agy + mã hóa AES-256 + cảnh báo gia hạn
+gpool agy-encrypt               # Mã hóa toàn bộ kho agy-sessions bằng AES-256-GCM (Keychain master key)
+gpool agy-onboard               # Wizard 1/N tự bắt link OAuth & tự động capture phiên agy
+gpool stats                     # Biểu đồ hiệu suất & thống kê quota 7 ngày
+gpool export backup.enc --encrypted --with-sessions  # Backup mã hóa chuyển máy kèm phiên agy
 gpool mcp                       # Chạy MCP Server (stdio) cho AI Agents (Devin/Claude/Codex/Cursor)
 ```
 

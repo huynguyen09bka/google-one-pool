@@ -95,7 +95,8 @@ gpool tui      # Mở TUI tường minh (alias: gpool ui)
 | `a` | Nạp phiên `agy` đã lưu của acc đang chọn vào Keychain | `gpool agy-activate <alias>` |
 | `c` | Lưu phiên `agy` hiện đang đăng nhập trong Keychain vào acc đang chọn | `gpool agy-capture <alias>` |
 | `A` (`Shift+a`) | Xem chi tiết trạng thái Keychain `agy` & toàn bộ snapshot đã lưu | `gpool agy-status` |
-| `H` (`Shift+h`) | Kiểm tra sức khỏe snapshot `agy`, trạng thái khóa `agy.lock` (`[U]` mở khóa) & cảnh báo gia hạn | `gpool agy-health` |
+| `H` (`Shift+h`) | Kiểm tra sức khỏe snapshot `agy`, **mã hóa AES-256 (`[E]`)**, khóa `agy.lock` (`[U]`) & cảnh báo gia hạn | `gpool agy-health` / `agy-encrypt` |
+| `U` (`Shift+u`) | Xem **Thống kê & Hiệu suất Pool 7 ngày** (tỷ lệ sẵn sàng, biểu đồ lượt dùng/quota) | `gpool stats` |
 | `n` / `N` | `n`: Xoay acc (+Chrome) • `N`: **Xoay nhanh `agy` kế tiếp & nạp thẳng Keychain** | `gpool next` / `gpool agy-next` |
 | `o` | Mở / focus cửa sổ Chrome Profile | `gpool open <alias>` |
 | `l` | Mở Chrome tại trang đăng nhập Google (điền sẵn email) | `gpool login <alias>` |
@@ -274,16 +275,26 @@ gpool launchagent install
 gpool launchagent status
 ```
 
-### Quy trình F — Sao lưu / khôi phục & dùng trong script (`--json`)
+### Quy trình F — Auto-Onboard 1/N, Mã hóa AES-256-GCM, Thống kê & Backup mã hóa
 
 ```bash
-# Xuất metadata (alias, email, tags, ghi chú, ngày gia hạn, cài đặt — KHÔNG bao gồm cookie hay token)
+# 1. Nạp nhanh nhiều acc mới vào agy (tự bắt link OAuth mở đúng Chrome + tự capture khi login xong)
+gpool agy-onboard
+
+# 2. Mã hóa toàn bộ kho agy-sessions trên đĩa bằng AES-256-GCM (master key lưu trong macOS Keychain)
+gpool agy-encrypt
+
+# 3. Xem biểu đồ hiệu suất & lượt đụng quota 7 ngày (hoặc 14 ngày)
+gpool stats --days 7
+
+# 4. Xuất backup mã hóa AES-256-GCM kèm toàn bộ phiên agy để chuyển sang máy Mac khác
+gpool export backup.gpool.enc --encrypted --with-sessions
+
+# 5. Khôi phục trên máy mới (tự phát hiện file mã hóa, giải mã & mã hóa lại bằng Keychain máy đích)
+gpool import backup.gpool.enc
+
+# Hoặc xuất metadata thuần (không cookie/token) & dùng với jq:
 gpool export backup-pool.json
-
-# Khôi phục trên máy mới hoặc sau khi cài lại
-gpool import backup-pool.json
-
-# Lấy danh sách tài khoản sẵn sàng dạng JSON để xử lý với jq
 gpool list --status ready --json | jq -r '.accounts[].alias'
 ```
 
@@ -330,10 +341,13 @@ gpool list --status ready --json | jq -r '.accounts[].alias'
 | `agy-capture` | `gpool agy-capture <alias> [--json]` | Lưu phiên `agy` hiện tại trong Keychain vào snapshot của `<alias>` |
 | `agy-activate` | `gpool agy-activate <alias> [--force] [--json]` | Nạp snapshot phiên `agy` của `<alias>` vào Keychain (tự re-capture acc cũ trước) |
 | `agy-status` | `gpool agy-status [--json]` | Xem phiên đang nạp trong Keychain, tiến trình `agy` đang chạy và danh sách snapshot |
-| `agy-health` | `gpool agy-health [--json]` | Kiểm tra sức khỏe toàn bộ snapshot `agy` (`refresh_token`, hạn token, khớp email) + cảnh báo gia hạn |
+| `agy-health` | `gpool agy-health [--json]` | Kiểm tra sức khỏe toàn bộ snapshot `agy` (`refresh_token`, hạn token, mã hóa AES-256) + cảnh báo gia hạn |
+| `agy-encrypt` | `gpool agy-encrypt [--json]` | Tạo master key trong macOS Keychain & mã hóa toàn bộ snapshot `agy` trên đĩa bằng AES-256-GCM |
+| `agy-onboard` | `gpool agy-onboard [alias] [--all] [--timeout 180] [--login-cmd "..."]` | Wizard 1/N tự bắt link OAuth mở đúng Chrome & tự động capture (mã hóa) khi Keychain đăng nhập xong |
 | `agy-lock` | `gpool agy-lock <status\|unlock> [--json]` | Xem tiến trình đang giữ khóa `agy.lock` hoặc mở khóa khẩn cấp |
+| `stats` (`analytics`) | `gpool stats [--days 7] [--json]` | Biểu đồ hiệu suất pool, lượt switch/nạp `agy`, số lần đụng quota và độ phủ mã hóa |
 | `run` | `gpool run <alias> [--force] -- <lệnh...>` | Chạy lệnh với ngữ cảnh tài khoản (`agy`: tự nạp Keychain/ADC; `gemini`: `GEMINI_CLI_HOME`) |
-| `mcp` | `gpool mcp` | Chạy MCP Server qua `stdio` (JSON-RPC 2.0) cho AI Agents |
+| `mcp` | `gpool mcp` | Chạy MCP Server qua `stdio` (JSON-RPC 2.0, 8 tools gồm `pool_analytics`) cho AI Agents |
 
 ### Dịch vụ nền, Dashboard, macOS & Sao lưu
 | Lệnh | Cú pháp & Flags | Mô tả |

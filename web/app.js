@@ -1160,12 +1160,22 @@ async function refreshAgyHealth() {
       [`Khỏe mạnh: ${data.summary.healthy}`, 'badge-ready'],
       [`Chờ refresh: ${data.summary.needs_refresh}`, 'badge-link'],
       [`Chưa lưu: ${data.summary.missing_snapshot}`, 'badge-neutral'],
+      [
+        `Mã hóa AES-256: ${data.summary.encrypted ?? 0}/${(data.summary.encrypted ?? 0) + (data.summary.unencrypted ?? 0)}`,
+        (data.summary.unencrypted ?? 0) === 0 ? 'badge-ready' : 'badge-cooldown',
+      ],
       [`Lỗi: ${data.summary.issues}`, data.summary.issues > 0 ? 'badge-danger' : 'badge-neutral'],
     ]) {
       const span = document.createElement('span');
       span.className = `badge ${cls}`;
       span.textContent = label;
       summaryEl.appendChild(span);
+    }
+
+    const encBtn = el('btn-encrypt-sessions');
+    if (encBtn) {
+      encBtn.hidden = !(data.summary.unencrypted > 0);
+      encBtn.textContent = `Mã hóa ${data.summary.unencrypted} phiên (AES-256-GCM)`;
     }
 
     if (data.lease) {
@@ -1211,6 +1221,13 @@ async function refreshAgyHealth() {
         stBadge.textContent = stLabel;
         title.appendChild(stBadge);
 
+        if (acc.captured) {
+          const encBadge = document.createElement('span');
+          encBadge.className = `badge ${acc.encrypted ? 'badge-accent' : 'badge-cooldown'}`;
+          encBadge.textContent = acc.encrypted ? 'AES-256' : 'Chưa mã hóa';
+          title.appendChild(encBadge);
+        }
+
         const detail = document.createElement('div');
         detail.className = 'health-row-detail';
         detail.textContent = `${acc.email} — ${acc.detail}`;
@@ -1249,6 +1266,120 @@ async function unlockAgyLease() {
     await Promise.all([refreshAgyHealth(), refreshAll()]);
   } catch (err) {
     showToast(`Lỗi mở khóa: ${err.message}`, 'error');
+  }
+}
+
+async function encryptAllAgySessions() {
+  const btn = el('btn-encrypt-sessions');
+  if (btn) btn.disabled = true;
+  try {
+    const res = await api('/api/agy/encrypt', { method: 'POST' });
+    showToast(
+      `Đã mã hóa AES-256-GCM cho ${res.encrypted.length} phiên agy (đã mã hóa sẵn: ${res.already_encrypted.length}).`,
+      res.failed.length > 0 ? 'warn' : 'success',
+    );
+    await Promise.all([refreshAgyHealth(), refreshAll()]);
+  } catch (err) {
+    showToast(`Lỗi mã hóa phiên agy: ${err.message}`, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+async function openAnalyticsModal() {
+  el('analytics-modal').hidden = false;
+  await refreshAnalytics();
+}
+
+async function refreshAnalytics() {
+  const kpisEl = el('analytics-kpis');
+  const barsEl = el('analytics-bars');
+  const listEl = el('analytics-accounts');
+  kpisEl.replaceChildren();
+  barsEl.replaceChildren();
+  listEl.replaceChildren();
+
+  try {
+    const data = await api('/api/analytics?days=7');
+    const s = data.summary;
+    for (const [label, val] of [
+      ['Sẵn sàng hiện tại', `${s.availability_percent}% (${s.ready_accounts}/${s.total_accounts})`],
+      ['Lượt Switch / Nạp agy', `${s.total_switches} / ${s.total_agy_activations}`],
+      ['Đụng quota (7n / tổng)', `${s.quota_hits_window} / ${s.quota_hits_total}`],
+      ['Phiên agy mã hóa', `${s.agy_encrypted_accounts}/${s.agy_captured_accounts}`],
+    ]) {
+      const box = document.createElement('div');
+      box.className = 'analytics-stat';
+      const lbl = document.createElement('span');
+      lbl.textContent = label;
+      const num = document.createElement('strong');
+      num.textContent = val;
+      box.appendChild(lbl);
+      box.appendChild(num);
+      kpisEl.appendChild(box);
+    }
+
+    const maxTotal = Math.max(1, ...data.daily.map((d) => d.switches + d.agy_activations + d.quota_hits));
+    for (const d of data.daily) {
+      const row = document.createElement('div');
+      row.className = 'analytics-bar-row';
+      const dateSpan = document.createElement('span');
+      dateSpan.className = 'event-time';
+      dateSpan.textContent = d.date.slice(5);
+
+      const track = document.createElement('div');
+      track.className = 'analytics-bar-track';
+      const ops = d.switches + d.agy_activations;
+      const opsBar = document.createElement('div');
+      opsBar.className = 'analytics-bar-ops';
+      opsBar.style.width = `${Math.round((ops / maxTotal) * 100)}%`;
+      const qBar = document.createElement('div');
+      qBar.className = 'analytics-bar-quota';
+      qBar.style.width = `${Math.round((d.quota_hits / maxTotal) * 100)}%`;
+      track.appendChild(opsBar);
+      track.appendChild(qBar);
+
+      const meta = document.createElement('span');
+      meta.className = 'event-time';
+      meta.textContent = `${ops} lượt${d.quota_hits ? ` • ${d.quota_hits} CD` : ''}`;
+
+      row.appendChild(dateSpan);
+      row.appendChild(track);
+      row.appendChild(meta);
+      barsEl.appendChild(row);
+    }
+
+    for (const a of data.accounts) {
+      const row = document.createElement('div');
+      row.className = 'health-row';
+      const left = document.createElement('div');
+      left.className = 'health-row-left';
+      const title = document.createElement('div');
+      title.className = 'health-row-title';
+      title.textContent = a.alias;
+      const tierB = document.createElement('span');
+      tierB.className = 'badge badge-accent';
+      tierB.textContent = a.plan_tier;
+      title.appendChild(tierB);
+      if (a.agy_captured) {
+        const encB = document.createElement('span');
+        encB.className = `badge ${a.agy_encrypted ? 'badge-ready' : 'badge-cooldown'}`;
+        encB.textContent = a.agy_encrypted ? 'AES-256' : 'Plain';
+        title.appendChild(encB);
+      }
+      const detail = document.createElement('div');
+      detail.className = 'health-row-detail';
+      detail.textContent = `Đã dùng: ${a.use_count} lần • Đụng quota 7n: ${a.quota_hits_window} (tổng: ${a.quota_hits_total}) • Trạng thái: ${a.effective_state}`;
+      left.appendChild(title);
+      left.appendChild(detail);
+      row.appendChild(left);
+      listEl.appendChild(row);
+    }
+  } catch (err) {
+    const p = document.createElement('p');
+    p.className = 'form-error';
+    p.textContent = `Không tải được thống kê: ${err.message}`;
+    listEl.appendChild(p);
   }
 }
 
@@ -1522,8 +1653,11 @@ function bindEvents() {
   el('btn-import-chrome').addEventListener('click', () => openImportChromeModal('discover'));
   el('btn-rescan-chrome').addEventListener('click', () => discoverChromeAccounts());
   el('btn-settings').addEventListener('click', () => openSettingsModal());
+  el('btn-analytics').addEventListener('click', () => openAnalyticsModal());
+  el('btn-refresh-analytics').addEventListener('click', () => refreshAnalytics());
   el('btn-agy-health').addEventListener('click', () => openAgyHealthModal());
   el('btn-refresh-health').addEventListener('click', () => refreshAgyHealth());
+  el('btn-encrypt-sessions').addEventListener('click', () => encryptAllAgySessions());
   el('btn-unlock-lease').addEventListener('click', () => unlockAgyLease());
   el('btn-sweep').addEventListener('click', () => runKeepAliveSweep());
   el('btn-rotate-agy-next').addEventListener('click', () => rotateNext(true));
@@ -1928,6 +2062,61 @@ function bindEvents() {
     }
   });
 
+  el('btn-export-encrypted').addEventListener('click', async () => {
+    const passphrase = el('backup-passphrase').value;
+    if (!passphrase || passphrase.length < 6) {
+      showToast('Hãy nhập mật khẩu mã hóa ít nhất 6 ký tự trước khi xuất.', 'warn');
+      el('backup-passphrase').focus();
+      return;
+    }
+    try {
+      const res = await api('/api/export/encrypted', {
+        method: 'POST',
+        body: JSON.stringify({ passphrase, withSessions: true }),
+      });
+      const blob = new Blob([JSON.stringify(res.bundle, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `google-one-pool-encrypted-${new Date().toISOString().slice(0, 10)}.gpool.enc`;
+      a.click();
+      URL.revokeObjectURL(url);
+      el('backup-passphrase').value = '';
+      showToast(`Đã xuất backup mã hóa AES-256-GCM (kèm ${res.sessions_count} phiên agy).`, 'success');
+    } catch (err) {
+      showToast(`Lỗi xuất backup mã hóa: ${err.message}`, 'error');
+    }
+  });
+
+  el('input-import-encrypted').addEventListener('change', async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const passphrase = el('backup-passphrase').value;
+    if (!passphrase) {
+      showToast('Hãy nhập mật khẩu giải mã vào ô mật khẩu trước khi chọn file.', 'warn');
+      el('backup-passphrase').focus();
+      e.target.value = '';
+      return;
+    }
+    try {
+      const bundle = JSON.parse(await file.text());
+      const res = await api('/api/import/encrypted', {
+        method: 'POST',
+        body: JSON.stringify({ passphrase, bundle }),
+      });
+      el('backup-passphrase').value = '';
+      showToast(
+        `Khôi phục backup mã hóa thành công: +${res.created} mới, ${res.updated} cập nhật, ${res.sessions_imported} phiên agy.`,
+        'success',
+      );
+      await refreshAll();
+    } catch (err) {
+      showToast(`Lỗi nhập backup mã hóa: ${err.message}`, 'error');
+    } finally {
+      e.target.value = '';
+    }
+  });
+
   el('btn-confirm-delete').addEventListener('click', async () => {
     if (!state.deleteTargetAlias) return;
     const delBtn = el('btn-confirm-delete');
@@ -1958,6 +2147,7 @@ function bindEvents() {
       closeModal('delete-modal');
       closeModal('import-chrome-modal');
       closeModal('agy-health-modal');
+      closeModal('analytics-modal');
     }
   });
 }

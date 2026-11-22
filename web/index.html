@@ -30,6 +30,7 @@
             </div>
           </div>
           <div class="action-group">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-analytics">Thống kê</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-agy-health">Sức khỏe agy</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-sweep">Quét phiên</button>
             <button type="button" class="btn btn-secondary btn-sm" id="btn-import-chrome">Nhập Chrome</button>
@@ -483,6 +484,28 @@
             </div>
           </div>
 
+          <div class="backup-box">
+            <div style="flex: 1 1 240px;">
+              <strong>Backup mã hóa AES-256-GCM (chuyển máy kèm phiên agy)</strong>
+              <p class="muted-small">Dùng mật khẩu riêng (≥ 6 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.</p>
+            </div>
+            <div class="encrypted-backup-controls">
+              <input
+                type="password"
+                id="backup-passphrase"
+                placeholder="Mật khẩu mã hóa / giải mã (≥ 6 ký tự)"
+                autocomplete="new-password"
+              />
+              <div class="backup-actions">
+                <button type="button" class="btn btn-primary btn-sm" id="btn-export-encrypted">Xuất mã hóa (+agy)</button>
+                <label class="btn btn-secondary btn-sm file-btn">
+                  Nhập mã hóa
+                  <input type="file" id="input-import-encrypted" accept="application/json,.json,.enc" hidden />
+                </label>
+              </div>
+            </div>
+          </div>
+
           <p class="form-error" id="settings-form-error" hidden></p>
           <div class="modal-footer">
             <button type="button" class="btn btn-secondary" data-close-modal="settings-modal">Đóng</button>
@@ -532,8 +555,33 @@
             <div id="health-renewals-list"></div>
           </div>
           <div class="modal-footer">
+            <button type="button" class="btn btn-success-soft" id="btn-encrypt-sessions" hidden>
+              Mã hóa tất cả (AES-256-GCM)
+            </button>
             <button type="button" class="btn btn-secondary" id="btn-refresh-health">Kiểm tra lại</button>
             <button type="button" class="btn btn-primary" data-close-modal="agy-health-modal">Đóng</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal Thống kê & Hiệu suất Pool -->
+    <div class="modal-backdrop" id="analytics-modal" hidden>
+      <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="analytics-title">
+        <div class="modal-header">
+          <h3 id="analytics-title">Thống kê &amp; Hiệu suất Pool (7 ngày gần đây)</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="analytics-modal" aria-label="Đóng">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="analytics-kpi-row" id="analytics-kpis"></div>
+          <div class="analytics-chart-card">
+            <div class="analytics-chart-title">Hoạt động theo ngày (Switch + Nạp agy vs Đụng quota)</div>
+            <div class="analytics-bars" id="analytics-bars"></div>
+          </div>
+          <div class="health-list" id="analytics-accounts"></div>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" id="btn-refresh-analytics">Làm mới</button>
+            <button type="button" class="btn btn-primary" data-close-modal="analytics-modal">Đóng</button>
           </div>
         </div>
       </div>

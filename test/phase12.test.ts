@@ -279,7 +279,7 @@ describe('Phase 1 + Phase 2: Lease Lock, Bucketed Cooldowns, Health, Failover & 
 
     const list = await handle({ jsonrpc: '2.0', id: 2, method: 'tools/list' });
     const tools = (list?.result as { tools: Array<{ name: string }> }).tools;
-    assert.equal(tools.length, 7);
+    assert.equal(tools.length, 8);
 
     const callTool = async (name: string, args: Record<string, unknown> = {}) => {
       const res = await handle({ jsonrpc: '2.0', id: 99, method: 'tools/call', params: { name, arguments: args } });

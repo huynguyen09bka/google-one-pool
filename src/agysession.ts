@@ -3,9 +3,22 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import {
+  decryptSnapshotSecret,
+  encryptSnapshotSecret,
+  getOrCreateMasterKey,
+  readMasterKeyIfPresent,
+  type EncryptedSnapshotEnvelope,
+} from './agycrypto.ts';
 import { readAgyLease } from './agylock.ts';
 import type { PoolPaths } from './config.ts';
-import type { AccountRecord, AgyHealthEntry, AgyHealthReport, RenewalAlert } from './types.ts';
+import type {
+  AccountRecord,
+  AgyEncryptMigrationResult,
+  AgyHealthEntry,
+  AgyHealthReport,
+  RenewalAlert,
+} from './types.ts';
 
 /**
  * agy CLI session swapper.
@@ -59,6 +72,7 @@ export interface AgySessionDeps {
   securityRun?: SecurityRunner;
   listClients?: ProcessLister;
   osHome?: string;
+  encrypt?: boolean;
 }
 
 export interface AgySessionSnapshot {
@@ -72,12 +86,22 @@ export interface AgySessionSnapshot {
   extra_files: Record<string, string>;
 }
 
+interface EncryptedAgySessionFile extends EncryptedSnapshotEnvelope {
+  version: 2;
+  encrypted: true;
+  alias: string;
+  detected_email: string | null;
+  captured_at: string;
+  blob_sha256: string;
+}
+
 export interface AgyCaptureResult {
   ok: true;
   alias: string;
   captured_at: string;
   detected_email: string | null;
   blob_sha256: string;
+  encrypted?: boolean;
   warning?: string;
 }
 
@@ -94,6 +118,7 @@ export interface AgySessionMeta {
   captured_at: string;
   detected_email: string | null;
   blob_sha256: string;
+  encrypted: boolean;
 }
 
 export interface AgyStatusResult {
@@ -186,11 +211,17 @@ function defaultProcessLister(): string[] {
   return names;
 }
 
-function resolveDeps(deps?: AgySessionDeps): Required<AgySessionDeps> {
-  const resolved: Required<AgySessionDeps> = {
+function resolveDeps(deps?: AgySessionDeps): {
+  securityRun: SecurityRunner;
+  listClients: ProcessLister;
+  osHome: string;
+  encrypt?: boolean;
+} {
+  const resolved = {
     securityRun: deps?.securityRun ?? defaultSecurityRun,
     listClients: deps?.listClients ?? defaultProcessLister,
     osHome: deps?.osHome ?? os.homedir(),
+    encrypt: deps?.encrypt,
   };
   if (!deps?.securityRun && process.platform !== 'darwin') {
     throw new Error('Quản lý phiên agy qua Keychain chỉ hỗ trợ macOS.');
@@ -316,7 +347,7 @@ function restoreExtraSecretFiles(osHome: string, files: Record<string, string>):
   }
 }
 
-function detectEmailInBlob(blob: Buffer): string | null {
+export function detectEmailInBlob(blob: Buffer): string | null {
   let text = blob.toString('utf8');
   // go-keyring bọc payload dạng "go-keyring-base64:<b64(JSON)>"; JSON trong có
   // field id_token_email — giải lớp bọc trước khi soi email.
@@ -335,23 +366,147 @@ function detectEmailInBlob(blob: Buffer): string | null {
   return match ? match[0].toLowerCase() : null;
 }
 
-function loadSnapshot(paths: PoolPaths, alias: string): AgySessionSnapshot | null {
+function loadSnapshotMeta(paths: PoolPaths, alias: string): AgySessionMeta | null {
   const file = snapshotFilePath(paths, alias);
   try {
-    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as AgySessionSnapshot;
-    if (parsed.version !== 1 || typeof parsed.keychain_blob_b64 !== 'string') return null;
-    return parsed;
+    const parsed = JSON.parse(fs.readFileSync(file, 'utf8')) as
+      | Partial<AgySessionSnapshot>
+      | Partial<EncryptedAgySessionFile>;
+    if (
+      parsed.version === 2 &&
+      (parsed as Partial<EncryptedAgySessionFile>).encrypted === true &&
+      typeof (parsed as Partial<EncryptedAgySessionFile>).ciphertext_b64 === 'string'
+    ) {
+      return {
+        alias: typeof parsed.alias === 'string' ? parsed.alias : alias,
+        captured_at: typeof parsed.captured_at === 'string' ? parsed.captured_at : '',
+        detected_email: typeof parsed.detected_email === 'string' ? parsed.detected_email : null,
+        blob_sha256: typeof parsed.blob_sha256 === 'string' ? parsed.blob_sha256 : '',
+        encrypted: true,
+      };
+    }
+    if (parsed.version === 1 && typeof (parsed as Partial<AgySessionSnapshot>).keychain_blob_b64 === 'string') {
+      return {
+        alias: typeof parsed.alias === 'string' ? parsed.alias : alias,
+        captured_at: typeof parsed.captured_at === 'string' ? parsed.captured_at : '',
+        detected_email: typeof parsed.detected_email === 'string' ? parsed.detected_email : null,
+        blob_sha256: typeof parsed.blob_sha256 === 'string' ? parsed.blob_sha256 : '',
+        encrypted: false,
+      };
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
+function loadSnapshotWithInfo(
+  paths: PoolPaths,
+  alias: string,
+  deps?: AgySessionDeps,
+): { snapshot: AgySessionSnapshot; encrypted: boolean } | null {
+  const file = snapshotFilePath(paths, alias);
+  let raw: string;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+
+  let parsed: Record<string, unknown>;
+  try {
+    parsed = JSON.parse(raw) as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+
+  if (parsed.version === 1 && typeof parsed.keychain_blob_b64 === 'string') {
+    return {
+      snapshot: parsed as unknown as AgySessionSnapshot,
+      encrypted: false,
+    };
+  }
+
+  if (parsed.version === 2 && parsed.encrypted === true && typeof parsed.ciphertext_b64 === 'string') {
+    const enc = parsed as unknown as EncryptedAgySessionFile;
+    const masterKey = readMasterKeyIfPresent(deps);
+    if (!masterKey) {
+      throw new Error(
+        `Snapshot agy của "${alias}" đã được mã hóa AES-256-GCM nhưng không tìm thấy master key ("google-one-pool"/"master-key") trong Keychain.`,
+      );
+    }
+    const secret = decryptSnapshotSecret(enc, masterKey, enc.alias || alias);
+    return {
+      snapshot: {
+        version: 1,
+        alias: enc.alias || alias,
+        detected_email: enc.detected_email ?? null,
+        captured_at: enc.captured_at ?? '',
+        blob_sha256: enc.blob_sha256 ?? '',
+        keychain_blob_b64: secret.keychain_blob_b64,
+        user_scope: secret.user_scope ?? null,
+        extra_files: secret.extra_files ?? {},
+      },
+      encrypted: true,
+    };
+  }
+
+  return null;
+}
+
+function loadSnapshot(paths: PoolPaths, alias: string, deps?: AgySessionDeps): AgySessionSnapshot | null {
+  try {
+    return loadSnapshotWithInfo(paths, alias, deps)?.snapshot ?? null;
   } catch {
     return null;
   }
 }
 
 export function hasSessionSnapshot(paths: PoolPaths, alias: string): boolean {
-  return loadSnapshot(paths, alias) !== null;
+  return loadSnapshotMeta(paths, alias) !== null;
 }
 
-function writeSnapshotFile(filePath: string, snapshot: AgySessionSnapshot): void {
+function writeSnapshotFile(
+  filePath: string,
+  snapshot: AgySessionSnapshot,
+  deps?: AgySessionDeps,
+): boolean {
+  let masterKey: Buffer | null = null;
+  if (deps?.encrypt === true) {
+    masterKey = getOrCreateMasterKey(deps);
+  } else if (deps?.encrypt !== false) {
+    try {
+      masterKey = readMasterKeyIfPresent(deps);
+    } catch {
+      masterKey = null;
+    }
+  }
+
+  if (masterKey) {
+    const enc = encryptSnapshotSecret(
+      {
+        keychain_blob_b64: snapshot.keychain_blob_b64,
+        user_scope: snapshot.user_scope,
+        extra_files: snapshot.extra_files,
+      },
+      masterKey,
+      snapshot.alias,
+    );
+    const fileObj: EncryptedAgySessionFile = {
+      version: 2,
+      encrypted: true,
+      alias: snapshot.alias,
+      detected_email: snapshot.detected_email,
+      captured_at: snapshot.captured_at,
+      blob_sha256: snapshot.blob_sha256,
+      ...enc,
+    };
+    fs.writeFileSync(filePath, JSON.stringify(fileObj, null, 2), { encoding: 'utf8', mode: 0o600 });
+    return true;
+  }
+
   fs.writeFileSync(filePath, JSON.stringify(snapshot, null, 2), { encoding: 'utf8', mode: 0o600 });
+  return false;
 }
 
 function readMarker(paths: PoolPaths): { alias: string; updated_at: string } | null {
@@ -378,7 +533,7 @@ function writeMarker(paths: PoolPaths, alias: string): void {
 }
 
 /**
- * Returns alias -> session metadata for every snapshot stored by gpool.
+ * Returns alias -> session metadata for every snapshot stored by gpool (supports v1 & encrypted v2).
  */
 export function listSessionMetas(paths: PoolPaths): Map<string, AgySessionMeta> {
   const dir = sessionsDir(paths);
@@ -391,14 +546,9 @@ export function listSessionMetas(paths: PoolPaths): Map<string, AgySessionMeta> 
   }
   for (const name of names) {
     if (!name.endsWith('.json') || name.startsWith('_')) continue;
-    const snap = loadSnapshot(paths, name.slice(0, -'.json'.length));
-    if (snap) {
-      out.set(snap.alias, {
-        alias: snap.alias,
-        captured_at: snap.captured_at,
-        detected_email: snap.detected_email,
-        blob_sha256: snap.blob_sha256,
-      });
+    const meta = loadSnapshotMeta(paths, name.slice(0, -'.json'.length));
+    if (meta) {
+      out.set(meta.alias, meta);
     }
   }
   return out;
@@ -460,7 +610,7 @@ export function captureAgySession(
   }
 
   ensureSessionsDir(paths);
-  writeSnapshotFile(snapshotFilePath(paths, account.alias), snapshot);
+  const encrypted = writeSnapshotFile(snapshotFilePath(paths, account.alias), snapshot, deps);
   writeMarker(paths, account.alias);
 
   return {
@@ -469,6 +619,7 @@ export function captureAgySession(
     captured_at: snapshot.captured_at,
     detected_email: snapshot.detected_email,
     blob_sha256: snapshot.blob_sha256,
+    encrypted,
     ...(warning ? { warning } : {}),
   };
 }
@@ -488,7 +639,8 @@ export function activateAgySession(
   deps?: AgySessionDeps,
 ): AgyActivateResult {
   const { osHome } = resolveDeps(deps);
-  const snapshot = loadSnapshot(paths, account.alias);
+  const loaded = loadSnapshotWithInfo(paths, account.alias, deps);
+  const snapshot = loaded?.snapshot ?? null;
   if (!snapshot) {
     throw new Error(
       `Tài khoản "${account.alias}" chưa có phiên agy đã lưu. ` +
@@ -518,19 +670,19 @@ export function activateAgySession(
     // không rõ (user có thể đã login tay acc khác): lưu orphan thay vì ghi đè
     // nhầm snapshot.
     if (ownerAlias) {
-      const ownerSnap = loadSnapshot(paths, ownerAlias);
+      const ownerMeta = loadSnapshotMeta(paths, ownerAlias);
       const liveEmail = detectEmailInBlob(current);
-      if (ownerSnap?.detected_email && liveEmail && ownerSnap.detected_email !== liveEmail) {
+      if (ownerMeta?.detected_email && liveEmail && ownerMeta.detected_email !== liveEmail) {
         ownerAlias = null;
       }
     }
 
     if (ownerAlias && ownerAlias !== account.alias) {
       const refreshed = buildSnapshotFromLive(ownerAlias, current, osHome);
-      writeSnapshotFile(snapshotFilePath(paths, ownerAlias), refreshed);
+      writeSnapshotFile(snapshotFilePath(paths, ownerAlias), refreshed, deps);
       recapturedAlias = ownerAlias;
     } else if (!ownerAlias || ownerAlias !== account.alias) {
-      writeSnapshotFile(orphanFilePath(paths), buildSnapshotFromLive('_orphan', current, osHome));
+      writeSnapshotFile(orphanFilePath(paths), buildSnapshotFromLive('_orphan', current, osHome), deps);
       orphanSaved = true;
     }
   }
@@ -632,16 +784,16 @@ export function sessionInfoForAlias(
   markerAlias: string | null,
   liveOwnerAlias?: string | null,
 ): AgySessionInfo | null {
-  const snap = loadSnapshot(paths, alias);
-  if (!snap) return null;
+  const meta = loadSnapshotMeta(paths, alias);
+  if (!meta) return null;
   const isLiveOwner =
     liveOwnerAlias !== undefined
       ? liveOwnerAlias === alias
-      : liveSha !== null && snap.blob_sha256 === liveSha;
+      : liveSha !== null && meta.blob_sha256 === liveSha;
   return {
     captured: true,
-    captured_at: snap.captured_at,
-    detected_email: snap.detected_email,
+    captured_at: meta.captured_at,
+    detected_email: meta.detected_email,
     is_live_owner: isLiveOwner,
     active_alias: liveOwnerAlias !== undefined ? liveOwnerAlias : markerAlias,
   };
@@ -761,13 +913,42 @@ export function inspectAgyHealth(
   const entries: AgyHealthEntry[] = [];
 
   for (const acc of accounts) {
-    const snap = loadSnapshot(paths, acc.alias);
-    if (!snap) {
+    let loaded: { snapshot: AgySessionSnapshot; encrypted: boolean } | null = null;
+    let decryptError: string | null = null;
+    try {
+      loaded = loadSnapshotWithInfo(paths, acc.alias, deps);
+    } catch (err) {
+      decryptError = err instanceof Error ? err.message : String(err);
+    }
+
+    if (decryptError) {
+      entries.push({
+        alias: acc.alias,
+        email: acc.email,
+        plan_tier: acc.plan_tier,
+        captured: true,
+        encrypted: true,
+        captured_at: loadSnapshotMeta(paths, acc.alias)?.captured_at ?? null,
+        detected_email: loadSnapshotMeta(paths, acc.alias)?.detected_email ?? null,
+        email_matches: false,
+        has_refresh_token: false,
+        token_expiry: null,
+        access_token_expired: null,
+        auth_method: null,
+        health: 'corrupt',
+        detail: decryptError,
+        is_live: false,
+      });
+      continue;
+    }
+
+    if (!loaded) {
       entries.push({
         alias: acc.alias,
         email: acc.email,
         plan_tier: acc.plan_tier,
         captured: false,
+        encrypted: false,
         captured_at: null,
         detected_email: null,
         email_matches: false,
@@ -782,6 +963,7 @@ export function inspectAgyHealth(
       continue;
     }
 
+    const snap = loaded.snapshot;
     let blob: Buffer;
     try {
       blob = Buffer.from(snap.keychain_blob_b64, 'base64');
@@ -822,6 +1004,7 @@ export function inspectAgyHealth(
       email: acc.email,
       plan_tier: acc.plan_tier,
       captured: true,
+      encrypted: loaded.encrypted,
       captured_at: snap.captured_at,
       detected_email: detectedEmail,
       email_matches: emailMatches,
@@ -847,6 +1030,8 @@ export function inspectAgyHealth(
       needs_refresh: entries.filter((e) => e.health === 'needs_refresh').length,
       missing_snapshot: entries.filter((e) => e.health === 'missing_snapshot').length,
       issues: entries.filter((e) => e.health === 'corrupt' || e.health === 'email_mismatch').length,
+      encrypted: entries.filter((e) => e.captured && e.encrypted).length,
+      unencrypted: entries.filter((e) => e.captured && !e.encrypted).length,
       renewal_alerts: renewalAlerts.length,
     },
     accounts: entries,
@@ -855,14 +1040,114 @@ export function inspectAgyHealth(
 }
 
 /**
+ * Migrates all plaintext v1 agy session snapshots on disk (including _orphan.json)
+ * into AES-256-GCM encrypted v2 files protected by the macOS Keychain master key.
+ */
+export function migrateSessionsToEncrypted(
+  paths: PoolPaths,
+  deps?: AgySessionDeps,
+): AgyEncryptMigrationResult {
+  const dir = sessionsDir(paths);
+  getOrCreateMasterKey(deps);
+
+  let names: string[] = [];
+  try {
+    names = fs.readdirSync(dir);
+  } catch {
+    return { ok: true, encrypted: [], already_encrypted: [], failed: [] };
+  }
+
+  const encrypted: string[] = [];
+  const alreadyEncrypted: string[] = [];
+  const failed: Array<{ alias: string; error: string }> = [];
+
+  for (const name of names) {
+    if (!name.endsWith('.json') || name === ACTIVE_MARKER_FILE) continue;
+    const alias = name.slice(0, -'.json'.length);
+    try {
+      const loaded = loadSnapshotWithInfo(paths, alias, deps);
+      if (!loaded) continue;
+      if (loaded.encrypted) {
+        alreadyEncrypted.push(alias);
+        continue;
+      }
+      writeSnapshotFile(snapshotFilePath(paths, alias), loaded.snapshot, { ...deps, encrypt: true });
+      encrypted.push(alias);
+    } catch (err) {
+      failed.push({ alias, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+
+  return { ok: true, encrypted, already_encrypted: alreadyEncrypted, failed };
+}
+
+/**
+ * Reads all captured snapshots in decrypted form for inclusion inside an encrypted portable backup.
+ */
+export function exportDecryptedSessions(paths: PoolPaths, deps?: AgySessionDeps): AgySessionSnapshot[] {
+  const metas = listSessionMetas(paths);
+  const out: AgySessionSnapshot[] = [];
+  for (const alias of metas.keys()) {
+    const snap = loadSnapshot(paths, alias, deps);
+    if (snap) out.push(snap);
+  }
+  return out;
+}
+
+/**
+ * Restores snapshots from an encrypted portable backup into local agy-sessions directory
+ * (re-encrypting them with the destination machine's Keychain master key when available).
+ */
+export function importSessionsFromBackup(
+  paths: PoolPaths,
+  snapshots: AgySessionSnapshot[],
+  deps?: AgySessionDeps,
+): { imported: number; encrypted: number } {
+  ensureSessionsDir(paths);
+  let imported = 0;
+  let encryptedCount = 0;
+  for (const snap of snapshots) {
+    if (!snap || typeof snap.alias !== 'string' || typeof snap.keychain_blob_b64 !== 'string') continue;
+    const normalized: AgySessionSnapshot = {
+      version: 1,
+      alias: snap.alias,
+      detected_email: snap.detected_email ?? null,
+      captured_at: snap.captured_at ?? new Date().toISOString(),
+      blob_sha256: snap.blob_sha256 ?? sha256Hex(Buffer.from(snap.keychain_blob_b64, 'base64')),
+      keychain_blob_b64: snap.keychain_blob_b64,
+      user_scope: snap.user_scope ?? null,
+      extra_files: snap.extra_files ?? {},
+    };
+    const wasEncrypted = writeSnapshotFile(snapshotFilePath(paths, normalized.alias), normalized, deps);
+    imported += 1;
+    if (wasEncrypted) encryptedCount += 1;
+  }
+  return { imported, encrypted: encryptedCount };
+}
+
+/**
  * Renames a stored agy session snapshot (and active marker) when an account alias changes.
  */
-export function renameSessionFilesForAlias(paths: PoolPaths, oldAlias: string, newAlias: string): void {
+export function renameSessionFilesForAlias(
+  paths: PoolPaths,
+  oldAlias: string,
+  newAlias: string,
+  deps?: AgySessionDeps,
+): void {
   if (oldAlias === newAlias) return;
-  const snap = loadSnapshot(paths, oldAlias);
-  if (snap) {
+  let loaded: { snapshot: AgySessionSnapshot; encrypted: boolean } | null = null;
+  try {
+    loaded = loadSnapshotWithInfo(paths, oldAlias, deps);
+  } catch {
+    loaded = null;
+  }
+  if (loaded) {
     ensureSessionsDir(paths);
-    writeSnapshotFile(snapshotFilePath(paths, newAlias), { ...snap, alias: newAlias });
+    writeSnapshotFile(
+      snapshotFilePath(paths, newAlias),
+      { ...loaded.snapshot, alias: newAlias },
+      { ...deps, encrypt: loaded.encrypted ? true : deps?.encrypt },
+    );
     try {
       fs.unlinkSync(snapshotFilePath(paths, oldAlias));
     } catch {

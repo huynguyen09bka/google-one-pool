@@ -10,9 +10,11 @@ import {
   getLiveKeychainContext,
   hasSessionSnapshot,
   inspectAgyHealth,
+  migrateSessionsToEncrypted,
   sessionInfoForAlias,
   type AgyStatusResult,
 } from './agysession.ts';
+import { computePoolAnalytics } from './analytics.ts';
 import {
   discoverBrowserProfiles,
   extractEmailsFromText,
@@ -39,6 +41,7 @@ import type {
   BulkImportResult,
   DaemonSettings,
   PlanTier,
+  PoolAnalyticsReport,
   PoolEvent,
   ProfileMode,
 } from './types.ts';
@@ -113,6 +116,7 @@ export type TuiModal =
   | { type: 'events'; scroll: number }
   | { type: 'agy-status'; status: AgyStatusResult }
   | { type: 'agy-health'; report: AgyHealthReport }
+  | { type: 'analytics'; report: PoolAnalyticsReport }
   | { type: 'help'; scroll: number };
 
 const USE_COLOR = !process.env.NO_COLOR;
@@ -822,13 +826,13 @@ function renderModal(state: TuiState, width: number, maxBodyRows: number): strin
 
   if (modal.type === 'agy-health') {
     const rep = modal.report;
-    out.push(boxTop('Sức khỏe phiên agy & Cảnh báo gia hạn ([U] mở khóa agy.lock, [Esc] đóng)', width, ANSI.cyan));
+    out.push(boxTop('Sức khỏe phiên agy ([E] mã hóa AES-256, [U] mở khóa agy.lock, [Esc] đóng)', width, ANSI.cyan));
     out.push(
       boxLine(
         `${paint(ANSI.brightGreen, `Khỏe mạnh: ${rep.summary.healthy}`)}  •  ` +
           `${paint(ANSI.cyan, `Chờ refresh: ${rep.summary.needs_refresh}`)}  •  ` +
           `${paint(ANSI.gray, `Chưa lưu: ${rep.summary.missing_snapshot}`)}  •  ` +
-          `${paint(rep.summary.issues > 0 ? ANSI.red : ANSI.gray, `Lỗi: ${rep.summary.issues}`)}`,
+          `${paint(rep.summary.unencrypted > 0 ? ANSI.yellow : ANSI.brightGreen, `AES-256: ${rep.summary.encrypted}/${rep.summary.encrypted + rep.summary.unencrypted}`)}`,
         innerW,
         ANSI.cyan,
       ),
@@ -891,6 +895,33 @@ function renderModal(state: TuiState, width: number, maxBodyRows: number): strin
     return out;
   }
 
+  if (modal.type === 'analytics') {
+    const rep = modal.report;
+    const s = rep.summary;
+    out.push(boxTop(`Thống kê & Hiệu suất Pool (${rep.window_days} ngày gần đây) — [Esc] đóng`, width, ANSI.cyan));
+    out.push(
+      boxLine(
+        `Sẵn sàng: ${paint(ANSI.brightGreen + ANSI.bold, `${s.availability_percent}%`)} (${s.ready_accounts}/${s.total_accounts})  │  ` +
+          `Switch/Nạp agy: ${paint(ANSI.cyan, `${s.total_switches}/${s.total_agy_activations}`)}  │  ` +
+          `Quota(7n): ${paint(ANSI.yellow, String(s.quota_hits_window))}  │  ` +
+          `AES-256: ${paint(ANSI.brightGreen, `${s.agy_encrypted_accounts}/${s.agy_captured_accounts}`)}`,
+        innerW,
+        ANSI.cyan,
+      ),
+    );
+    out.push(boxSep(width, ANSI.cyan));
+    const maxVal = Math.max(1, ...rep.daily.map((d) => d.switches + d.agy_activations + d.quota_hits));
+    for (const d of rep.daily) {
+      const ops = d.switches + d.agy_activations;
+      const barLen = Math.round((ops / maxVal) * 20);
+      const bar = paint(ANSI.brightBlue, '█'.repeat(barLen)) + paint(ANSI.gray, '░'.repeat(Math.max(0, 20 - barLen)));
+      const qTxt = d.quota_hits > 0 ? paint(ANSI.yellow, `  quota:${d.quota_hits}`) : '';
+      out.push(boxLine(`  ${d.date.slice(5)}  ${bar}  ${String(ops).padStart(3)} lượt${qTxt}`, innerW, ANSI.cyan));
+    }
+    out.push(boxBottom(width, ANSI.cyan));
+    return out;
+  }
+
   if (modal.type === 'events') {
     const events = state.snapshot?.events ?? [];
     const visibleH = Math.max(6, maxBodyRows - 3);
@@ -917,7 +948,7 @@ function renderModal(state: TuiState, width: number, maxBodyRows: number): strin
     ['g', 'Nạp phiên agy & chạy trực tiếp lệnh agy CLI', 'gpool run <alias> -- agy'],
     ['a', 'Nạp phiên agy đã lưu vào macOS Keychain', 'gpool agy-activate <alias>'],
     ['c', 'Lưu phiên agy đang đăng nhập vào tài khoản', 'gpool agy-capture <alias>'],
-    ['A / H', 'Xem trạng thái Keychain agy / Kiểm tra sức khỏe agy & gia hạn', 'gpool agy-status / agy-health'],
+    ['A / H / U', 'Trạng thái agy / Sức khỏe + Mã hóa AES-256 / Thống kê 7 ngày', 'gpool agy-status / agy-health / stats'],
     ['n / N', 'Xoay acc (+Chrome) / Xoay nhanh agy kế tiếp & nạp Keychain', 'gpool next / agy-next'],
     ['o / l', 'Mở Chrome Profile / Mở trang đăng nhập điền sẵn email', 'gpool open / login <alias>'],
     ['u', 'Mở link OAuth (tự lấy từ Clipboard) vào đúng profile', 'gpool auth <alias> [url]'],
@@ -1897,6 +1928,11 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           await options.runCliSubcommand(['login-wizard']);
           await waitEnterOnCookedStdin();
         });
+      } else if (chosen.id === 'agy-onboard') {
+        await suspendAndRun(async () => {
+          await options.runCliSubcommand(['agy-onboard']);
+          await waitEnterOnCookedStdin();
+        });
       }
       return;
     }
@@ -2202,7 +2238,28 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       }
 
       if (m.type === 'agy-health') {
-        if (str === 'U' || str === 'u') {
+        if (str === 'E' || str === 'e') {
+          void runAction('Đang mã hóa tất cả phiên agy bằng AES-256-GCM...', async () => {
+            const mig = (await isDaemonAlive(port))
+              ? await callDaemon<{ encrypted: string[]; already_encrypted: string[] }>(port, '/api/agy/encrypt', {
+                  method: 'POST',
+                })
+              : migrateSessionsToEncrypted(paths);
+            const rep = (await isDaemonAlive(port))
+              ? await callDaemon<AgyHealthReport>(port, '/api/agy/health')
+              : (() => {
+                  const db = new PoolDB(paths);
+                  try {
+                    const s = db.getSettings();
+                    return inspectAgyHealth(paths, db.listAccounts(), db.getRenewalAlerts(s.renewal_alert_days));
+                  } finally {
+                    db.close();
+                  }
+                })();
+            state.modal = { type: 'agy-health', report: rep };
+            setNotice(`Đã mã hóa AES-256-GCM cho ${mig.encrypted.length} phiên agy.`, 'success');
+          });
+        } else if (str === 'U' || str === 'u') {
           void runAction('Đang mở khóa agy.lock...', async () => {
             if (await isDaemonAlive(port)) {
               await callDaemon(port, '/api/agy/lease', { method: 'DELETE' });
@@ -2224,6 +2281,14 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
             setNotice('Đã mở khóa agy.lock.', 'success');
           });
         } else if (str === 'q' || key.name === 'return') {
+          state.modal = null;
+          draw();
+        }
+        return;
+      }
+
+      if (m.type === 'analytics') {
+        if (str === 'q' || key.name === 'return') {
           state.modal = null;
           draw();
         }
@@ -2370,6 +2435,23 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
       return;
     }
 
+    if (str === 'U') {
+      void runAction('Đang tính toán thống kê 7 ngày...', async () => {
+        const rep = (await isDaemonAlive(port))
+          ? await callDaemon<PoolAnalyticsReport>(port, '/api/analytics?days=7')
+          : (() => {
+              const db = new PoolDB(paths);
+              try {
+                return computePoolAnalytics(db, paths, { days: 7 });
+              } finally {
+                db.close();
+              }
+            })();
+        state.modal = { type: 'analytics', report: rep };
+      });
+      return;
+    }
+
     if (str === 'N') {
       const defCd = state.snapshot?.settings.default_cooldown_hours ?? 5;
       void doRotateNext(defCd, true);
@@ -2394,6 +2476,7 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
           { id: 'clipboard', label: '3. Nhập từ Clipboard (tự lọc mọi Gmail)', hint: '(import-clipboard)' },
           { id: 'manual-emails', label: '4. Nhập danh sách nhiều email thủ công', hint: '(import-emails)' },
           { id: 'login-wizard', label: '5. Chạy Wizard đăng nhập Profile riêng (1/N)', hint: '(login-wizard)' },
+          { id: 'agy-onboard', label: '6. Auto-Onboard phiên agy 1/N (tự bắt OAuth)', hint: '(agy-onboard)' },
         ],
       };
       draw();
