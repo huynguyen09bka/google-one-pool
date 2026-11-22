@@ -1,3 +1,5 @@
+import { applyStaticI18n, getLang, setLang, t } from '/i18n.js';
+
 const state = {
   accounts: [],
   activeAlias: null,
@@ -64,14 +66,14 @@ function formatDurationMs(ms) {
 }
 
 function formatRelativeTime(iso) {
-  if (!iso) return 'Chưa có';
+  if (!iso) return t('time_none');
   const ms = Date.parse(iso);
   if (Number.isNaN(ms)) return '—';
   const diffSec = Math.floor((Date.now() - ms) / 1000);
-  if (diffSec < 60) return 'vừa xong';
-  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} phút trước`;
-  if (diffSec < 86400) return `${Math.floor(diffSec / 3600)} giờ trước`;
-  return `${Math.floor(diffSec / 86400)} ngày trước`;
+  if (diffSec < 60) return t('time_just_now');
+  if (diffSec < 3600) return t('time_mins_ago', { n: Math.floor(diffSec / 60) });
+  if (diffSec < 86400) return t('time_hours_ago', { n: Math.floor(diffSec / 3600) });
+  return t('time_days_ago', { n: Math.floor(diffSec / 86400) });
 }
 
 function formatEventTimestamp(iso) {
@@ -97,29 +99,29 @@ function formatHoursBadge(hours) {
 
 function getEffectiveStateBadge(acc) {
   const map = {
-    active: ['Đang chọn', 'badge-active'],
-    ready: ['Sẵn sàng', 'badge-ready'],
-    cooldown: ['Đang Cooldown', 'badge-cooldown'],
-    needs_login: ['Cần đăng nhập', 'badge-danger'],
-    checking: ['Đang kiểm tra', 'badge-neutral'],
-    error: ['Lỗi kiểm tra', 'badge-danger'],
-    unknown: ['Chưa kiểm tra', 'badge-neutral'],
+    active: [t('state_active'), 'badge-active'],
+    ready: [t('state_ready'), 'badge-ready'],
+    cooldown: [t('state_cooldown'), 'badge-cooldown'],
+    needs_login: [t('state_needs_login'), 'badge-danger'],
+    checking: [t('state_checking'), 'badge-neutral'],
+    error: [t('state_error'), 'badge-danger'],
+    unknown: [t('state_unknown'), 'badge-neutral'],
   };
-  return map[acc.effective_state] || ['Không rõ', 'badge-neutral'];
+  return map[acc.effective_state] || [t('state_unknown'), 'badge-neutral'];
 }
 
 function getSessionText(acc) {
   switch (acc.session_status) {
     case 'live':
-      return 'Live';
+      return t('session_live');
     case 'needs_login':
-      return 'Hết phiên (cần login)';
+      return t('session_expired');
     case 'error':
-      return 'Lỗi quét';
+      return t('session_error');
     case 'checking':
-      return 'Đang quét...';
+      return t('session_checking');
     default:
-      return 'Chưa quét';
+      return t('session_unknown');
   }
 }
 
@@ -127,7 +129,14 @@ function setSseConnected() {
   const sseDot = el('sse-dot');
   const sseText = el('sse-text');
   sseDot.className = 'dot dot-live';
-  sseText.textContent = 'Trực tuyến';
+  sseText.textContent = t('sse_online');
+}
+
+function syncLangFromSettings(settings) {
+  if (settings?.language && settings.language !== getLang()) {
+    setLang(settings.language);
+    applyStaticI18n();
+  }
 }
 
 function applySnapshot(snapshot) {
@@ -135,7 +144,10 @@ function applySnapshot(snapshot) {
   state.activeAlias = snapshot.activeAlias || null;
   state.summary = snapshot.summary || state.summary;
   state.keepalive = snapshot.keepalive || state.keepalive;
-  if (snapshot.settings) state.settings = snapshot.settings;
+  if (snapshot.settings) {
+    state.settings = snapshot.settings;
+    syncLangFromSettings(snapshot.settings);
+  }
   if (snapshot.events) state.events = snapshot.events;
   if (snapshot.agyStatus !== undefined) state.agyStatus = snapshot.agyStatus;
   if (snapshot.agyLease !== undefined) state.agyLease = snapshot.agyLease;
@@ -160,6 +172,7 @@ async function refreshAll() {
     if (accData.renewalAlerts !== undefined) state.renewalAlerts = accData.renewalAlerts || [];
     state.events = evData.events || [];
     state.settings = setData.settings || accData.settings || state.settings;
+    syncLangFromSettings(state.settings);
     state.cooldownTickTriggeredRefresh = false;
     renderAll();
   } catch (err) {
@@ -216,7 +229,7 @@ function renderLoginWizard() {
   panel.hidden = false;
   if (linkedAccounts.length > 0) {
     isolateAllBtn.hidden = false;
-    isolateAllBtn.textContent = `Tách tất cả (${linkedAccounts.length} acc Link) sang Profile riêng`;
+    isolateAllBtn.textContent = t('wizard_isolate_all', { count: linkedAccounts.length });
   } else {
     isolateAllBtn.hidden = true;
   }
@@ -224,10 +237,9 @@ function renderLoginWizard() {
   if (pending.length === 0) {
     state.wizardCurrentAlias = null;
     body.hidden = true;
-    eyebrowEl.textContent = 'CHUYỂN SANG PROFILE ĐỘC LẬP';
-    titleEl.textContent = `Đang có ${linkedAccounts.length} tài khoản dùng chế độ Link Chrome gốc`;
-    subtitleEl.textContent =
-      'Bấm "Tách tất cả" để tạo thư mục Chrome profile riêng cho từng tài khoản cùng lúc, sau đó Wizard sẽ mở nối tiếp từng acc để bạn đăng nhập 1 lần.';
+    eyebrowEl.textContent = t('wizard_eyebrow_link');
+    titleEl.textContent = t('wizard_title_link', { count: linkedAccounts.length });
+    subtitleEl.textContent = t('wizard_sub_link');
     return;
   }
 
@@ -240,10 +252,9 @@ function renderLoginWizard() {
   const current = pending[0];
   state.wizardCurrentAlias = current.alias;
 
-  eyebrowEl.textContent = 'WIZARD ĐĂNG NHẬP PROFILE RIÊNG (1/N)';
-  titleEl.textContent = `Còn ${pending.length} acc chờ đăng nhập (${doneCount}/${totalIso} hoàn tất)`;
-  subtitleEl.textContent =
-    'Mở từng cửa sổ Chrome một để tránh quá tải máy — đăng nhập xong acc hiện tại rồi bấm nút vàng để chuyển sang acc kế tiếp.';
+  eyebrowEl.textContent = t('wizard_eyebrow_iso');
+  titleEl.textContent = t('wizard_title_iso', { pending: pending.length, done: doneCount, total: totalIso });
+  subtitleEl.textContent = t('wizard_sub_iso');
 
   el('wizard-target-alias').textContent = current.alias;
   el('wizard-target-email').textContent = current.display_name
@@ -260,15 +271,15 @@ function renderKeepAlivePill() {
   if (state.keepalive.sweeping) {
     dot.className = 'dot dot-live';
     const current = state.keepalive.activeProbes?.[0];
-    text.textContent = current ? `Đang quét: ${current}` : 'Đang quét...';
+    text.textContent = current ? t('ka_probing', { alias: current }) : t('ka_sweeping');
     sweepBtn.disabled = true;
   } else if (state.settings?.keepalive_enabled) {
     dot.className = 'dot dot-live';
-    text.textContent = `Keep-Alive (${state.settings.keepalive_interval_minutes}p)`;
+    text.textContent = t('ka_on', { mins: state.settings.keepalive_interval_minutes });
     sweepBtn.disabled = false;
   } else {
     dot.className = 'dot dot-muted';
-    text.textContent = 'Keep-Alive: Tắt';
+    text.textContent = t('ka_off');
     sweepBtn.disabled = false;
   }
 }
@@ -291,25 +302,22 @@ function renderHeroPanel() {
   const rotateAgyBtn = el('btn-rotate-agy-next');
 
   const cooldownHours = state.settings?.default_cooldown_hours ?? 5;
-  rotateAgyBtn.textContent = `Xoay agy kế (+${formatHoursBadge(cooldownHours)})`;
+  rotateAgyBtn.textContent = t('hero_rotate_agy', { hours: formatHoursBadge(cooldownHours) });
   rotateAgyBtn.disabled = state.accounts.length === 0 || state.busyActions.has('rotate-agy');
-  rotateBtn.textContent = `Đổi Chrome kế`;
+  rotateBtn.textContent = t('hero_rotate_chrome');
   rotateBtn.disabled = state.accounts.length === 0 || state.busyActions.has('rotate');
 
   if (state.agyLease && !state.agyLease.stale) {
     leasePillEl.hidden = false;
-    leasePillEl.textContent = `Khóa agy.lock: ${state.agyLease.holder} (${state.agyLease.alias})`;
-    leasePillEl.title = `PID ${state.agyLease.pid} — bấm "Sức khỏe agy" để xem hoặc mở khóa`;
+    leasePillEl.textContent = t('lease_badge', { holder: state.agyLease.holder, alias: state.agyLease.alias });
   } else {
     leasePillEl.hidden = true;
   }
 
   if (state.renewalAlerts && state.renewalAlerts.length > 0) {
     renewalPillEl.hidden = false;
-    renewalPillEl.textContent = `${state.renewalAlerts.length} acc sắp gia hạn`;
-    renewalPillEl.title = state.renewalAlerts
-      .map((a) => `${a.alias}: ${a.renewal_date} (${a.days_left <= 0 ? 'quá hạn' : `còn ${a.days_left} ngày`})`)
-      .join('\n');
+    renewalPillEl.textContent = t('renewal_badge', { count: state.renewalAlerts.length });
+    renewalPillEl.title = state.renewalAlerts.map((a) => `${a.alias}: ${a.renewal_date}`).join('\n');
   } else {
     renewalPillEl.hidden = true;
   }
@@ -318,35 +326,35 @@ function renderHeroPanel() {
     keychainPillEl.hidden = false;
     if (state.agyStatus.live_owner_alias) {
       keychainPillEl.className = 'badge badge-ready';
-      keychainPillEl.textContent = `agy Keychain: ${state.agyStatus.live_owner_alias}`;
+      keychainPillEl.textContent = t('keychain_owner', { owner: state.agyStatus.live_owner_alias });
     } else if (state.agyStatus.live_email) {
       keychainPillEl.className = 'badge badge-cooldown';
-      keychainPillEl.textContent = `agy Keychain: ${state.agyStatus.live_email} (chưa lưu)`;
+      keychainPillEl.textContent = t('keychain_uncaptured', { email: state.agyStatus.live_email });
     } else {
       keychainPillEl.className = 'badge badge-neutral';
-      keychainPillEl.textContent = 'agy Keychain: chưa xác định';
+      keychainPillEl.textContent = t('keychain_unknown');
     }
   } else if (state.agyStatus && !state.agyStatus.keychain_present) {
     keychainPillEl.hidden = false;
     keychainPillEl.className = 'badge badge-neutral';
-    keychainPillEl.textContent = 'agy Keychain: trống';
+    keychainPillEl.textContent = t('keychain_empty');
   } else {
     keychainPillEl.hidden = true;
   }
 
   if (!active) {
-    aliasEl.textContent = 'Chưa chọn tài khoản';
+    aliasEl.textContent = t('hero_none');
     badgeEl.textContent = '—';
     badgeEl.className = 'badge badge-neutral';
     planEl.hidden = true;
     modeEl.hidden = true;
     agyBadgeEl.hidden = true;
-    emailEl.textContent = 'Hãy bấm "Nhập Chrome" hoặc "+ Thêm" ở phía trên.';
+    emailEl.textContent = t('hero_none_email');
     metaEl.textContent = '';
     openBtn.disabled = true;
-    openBtn.textContent = 'Mở Chrome Profile';
+    openBtn.textContent = t('hero_open_chrome');
     agyBtn.disabled = true;
-    agyBtn.textContent = 'Nạp phiên agy';
+    agyBtn.textContent = t('hero_agy_activate');
     agyBtn.className = 'btn btn-secondary';
     return;
   }
@@ -361,48 +369,43 @@ function renderHeroPanel() {
   modeEl.hidden = false;
   if (active.profile_mode === 'linked') {
     modeEl.className = 'badge badge-link';
-    modeEl.textContent = `Link: ${active.chrome_profile_name || 'Default'}`;
+    modeEl.textContent = t('mode_link', { name: active.chrome_profile_name || 'Default' });
   } else {
     modeEl.className = 'badge badge-neutral';
-    modeEl.textContent = 'Profile riêng';
+    modeEl.textContent = t('mode_isolated');
   }
 
   if (active.agy_session?.captured) {
     agyBadgeEl.hidden = false;
     if (active.agy_session.is_live_owner) {
       agyBadgeEl.className = 'badge badge-ready';
-      agyBadgeEl.textContent = 'agy: đang dùng';
+      agyBadgeEl.textContent = t('agy_live');
       agyBtn.className = 'btn btn-ghost';
-      agyBtn.textContent = 'Cập nhật phiên agy';
-      agyBtn.title = 'Lưu lại snapshot phiên agy hiện tại trong Keychain vào tài khoản này';
+      agyBtn.textContent = t('hero_agy_update');
     } else {
       agyBadgeEl.className = 'badge badge-link';
-      agyBadgeEl.textContent = 'agy: đã lưu';
+      agyBadgeEl.textContent = t('agy_saved');
       agyBtn.className = 'btn btn-success-soft';
-      agyBtn.textContent = 'Nạp phiên agy';
-      agyBtn.title = 'Ghi phiên đã lưu của tài khoản này vào Keychain (đóng agy trước)';
+      agyBtn.textContent = t('hero_agy_activate');
     }
   } else {
     agyBadgeEl.hidden = true;
     agyBtn.className = 'btn btn-secondary';
-    agyBtn.textContent = 'Lưu phiên agy';
-    agyBtn.title = 'Lưu phiên agy đang đăng nhập trong Keychain vào tài khoản này';
+    agyBtn.textContent = t('hero_agy_capture');
   }
   agyBtn.disabled = state.busyActions.has(`agy:${active.alias}`);
 
   emailEl.textContent = active.display_name ? `${active.display_name} • ${active.email}` : active.email;
 
-  const parts = [`Phiên: ${getSessionText(active)}`, `Đã dùng ${active.use_count} lần`];
+  const parts = [t('meta_session', { state: getSessionText(active) }), t('meta_uses', { count: active.use_count })];
   if (active.renewal_date) {
-    const daysTxt =
-      active.renewal_days_left !== null ? ` (còn ${active.renewal_days_left} ngày)` : '';
-    parts.push(`Gia hạn: ${active.renewal_date}${daysTxt}`);
+    parts.push(t('meta_renewal', { date: active.renewal_date }));
   }
-  if (active.chrome_running) parts.push('Chrome đang mở');
+  if (active.chrome_running) parts.push(t('chrome_running'));
   metaEl.textContent = parts.join(' • ');
 
   const isNeedsLogin = active.session_status === 'needs_login' || active.session_status === 'unknown';
-  openBtn.textContent = isNeedsLogin ? 'Đăng nhập Chrome' : 'Mở Chrome Profile';
+  openBtn.textContent = isNeedsLogin ? t('hero_login_chrome') : t('hero_open_chrome');
   openBtn.disabled = state.busyActions.has(`open:${active.alias}`);
 }
 
@@ -615,17 +618,17 @@ function createAccountCard(acc) {
   const modePill = document.createElement('span');
   if (acc.profile_mode === 'linked') {
     modePill.className = 'badge badge-link';
-    modePill.textContent = `Link: ${acc.chrome_profile_name || 'Default'}`;
+    modePill.textContent = t('mode_link', { name: acc.chrome_profile_name || 'Default' });
   } else {
     modePill.className = 'badge badge-neutral';
-    modePill.textContent = 'Profile riêng';
+    modePill.textContent = t('mode_isolated');
   }
   badgeRow.appendChild(modePill);
 
   if (acc.chrome_running) {
     const chromePill = document.createElement('span');
     chromePill.className = 'badge badge-accent';
-    chromePill.textContent = 'Chrome mở';
+    chromePill.textContent = t('chrome_open');
     badgeRow.appendChild(chromePill);
   }
 
@@ -633,12 +636,10 @@ function createAccountCard(acc) {
     const agyPill = document.createElement('span');
     if (acc.agy_session.is_live_owner) {
       agyPill.className = 'badge badge-ready';
-      agyPill.textContent = 'agy: đang dùng';
-      agyPill.title = `Phiên agy trong Keychain đang thuộc ${acc.alias}`;
+      agyPill.textContent = t('agy_live');
     } else {
       agyPill.className = 'badge badge-neutral';
-      agyPill.textContent = 'agy: đã lưu';
-      agyPill.title = `Đã lưu phiên agy lúc ${acc.agy_session.captured_at || ''}`;
+      agyPill.textContent = t('agy_saved');
     }
     badgeRow.appendChild(agyPill);
   }
@@ -649,15 +650,11 @@ function createAccountCard(acc) {
   meta.className = 'meta-line';
   const metaParts = [
     acc.plan_tier,
-    `Phiên: ${getSessionText(acc)}`,
-    `Kiểm tra: ${formatRelativeTime(acc.last_checked_at)}`,
+    t('meta_session', { state: getSessionText(acc) }),
+    t('meta_checked', { time: formatRelativeTime(acc.last_checked_at) }),
   ];
   if (acc.renewal_date) {
-    const warnSuffix =
-      acc.renewal_days_left !== null && acc.renewal_days_left <= 7
-        ? ` (còn ${acc.renewal_days_left} ngày!)`
-        : '';
-    metaParts.push(`Gia hạn: ${acc.renewal_date}${warnSuffix}`);
+    metaParts.push(t('meta_renewal', { date: acc.renewal_date }));
   }
   if (acc.proxy_url) metaParts.push(`Proxy: ${acc.proxy_url}`);
   meta.textContent = metaParts.join(' • ');
@@ -743,7 +740,7 @@ function createAccountCard(acc) {
     const switchBtn = document.createElement('button');
     switchBtn.type = 'button';
     switchBtn.className = 'btn btn-sm btn-primary';
-    switchBtn.textContent = 'Chọn (Switch)';
+    switchBtn.textContent = t('card_switch');
     switchBtn.disabled = state.busyActions.has(`switch:${acc.alias}`);
     switchBtn.addEventListener('click', () => switchAccount(acc.alias));
     actions.appendChild(switchBtn);
@@ -752,7 +749,7 @@ function createAccountCard(acc) {
   const openBtn = document.createElement('button');
   openBtn.type = 'button';
   openBtn.className = acc.is_active ? 'btn btn-sm btn-primary' : 'btn btn-sm btn-secondary';
-  openBtn.textContent = isNeedsLogin ? 'Đăng nhập Chrome' : 'Mở Chrome';
+  openBtn.textContent = isNeedsLogin ? t('card_login') : t('card_open');
   openBtn.disabled = state.busyActions.has(`open:${acc.alias}`);
   openBtn.addEventListener('click', () =>
     isNeedsLogin ? openAccountLogin(acc.alias) : openAccountChrome(acc.alias),
@@ -765,19 +762,16 @@ function createAccountCard(acc) {
   if (acc.agy_session?.captured) {
     if (acc.agy_session.is_live_owner) {
       agyBtn.className = 'btn btn-sm btn-ghost';
-      agyBtn.textContent = 'Cập nhật agy';
-      agyBtn.title = 'Phiên Keychain đang là acc này — bấm để lưu lại snapshot mới nhất';
+      agyBtn.textContent = t('card_update_agy');
       agyBtn.addEventListener('click', () => agyCapture(acc.alias));
     } else {
       agyBtn.className = 'btn btn-sm btn-success-soft';
-      agyBtn.textContent = 'Nạp phiên agy';
-      agyBtn.title = 'Ghi phiên đã lưu của acc này vào Keychain (đóng agy trước)';
+      agyBtn.textContent = t('hero_agy_activate');
       agyBtn.addEventListener('click', () => agyActivate(acc.alias));
     }
   } else {
     agyBtn.className = 'btn btn-sm btn-secondary';
-    agyBtn.textContent = 'Lưu phiên agy';
-    agyBtn.title = 'Lưu phiên agy hiện tại trong Keychain vào acc này';
+    agyBtn.textContent = t('hero_agy_capture');
     agyBtn.addEventListener('click', () => agyCapture(acc.alias));
   }
   actions.appendChild(agyBtn);
@@ -788,7 +782,7 @@ function createAccountCard(acc) {
   const isProbing =
     Boolean(state.keepalive.activeProbes?.includes(acc.alias)) ||
     state.busyActions.has(`check:${acc.alias}`);
-  checkBtn.textContent = isProbing ? 'Đang quét...' : 'Kiểm tra';
+  checkBtn.textContent = isProbing ? t('card_checking') : t('card_check');
   checkBtn.disabled = isProbing;
   checkBtn.addEventListener('click', () => checkAccount(acc.alias));
   actions.appendChild(checkBtn);
@@ -803,8 +797,7 @@ function createAccountCard(acc) {
     const isolateBtn = document.createElement('button');
     isolateBtn.type = 'button';
     isolateBtn.className = 'btn btn-xs btn-ghost';
-    isolateBtn.title = 'Tạo Chrome profile riêng biệt để Keep-Alive chạy độc lập';
-    isolateBtn.textContent = 'Tách profile riêng';
+    isolateBtn.textContent = t('card_isolate');
     isolateBtn.disabled = state.busyActions.has(`isolate:${acc.alias}`);
     isolateBtn.addEventListener('click', () => isolateAccount(acc.alias));
     secondary.appendChild(isolateBtn);
@@ -813,26 +806,25 @@ function createAccountCard(acc) {
   const oauthSelectBtn = document.createElement('button');
   oauthSelectBtn.type = 'button';
   oauthSelectBtn.className = 'btn btn-xs btn-ghost';
-  oauthSelectBtn.textContent = 'Dán OAuth';
+  oauthSelectBtn.textContent = t('card_paste_oauth');
   oauthSelectBtn.addEventListener('click', () => {
     el('oauth-account-select').value = acc.alias;
     el('oauth-url-input').scrollIntoView({ behavior: 'smooth', block: 'center' });
     el('oauth-url-input').focus();
-    showToast(`Đã chọn ${acc.alias} để dán link OAuth.`, 'info');
   });
   secondary.appendChild(oauthSelectBtn);
 
   const editBtn = document.createElement('button');
   editBtn.type = 'button';
   editBtn.className = 'btn btn-xs btn-ghost';
-  editBtn.textContent = 'Sửa';
+  editBtn.textContent = t('card_edit');
   editBtn.addEventListener('click', () => openAccountModal(acc));
   secondary.appendChild(editBtn);
 
   const delBtn = document.createElement('button');
   delBtn.type = 'button';
   delBtn.className = 'btn btn-xs btn-danger-ghost';
-  delBtn.textContent = 'Xóa';
+  delBtn.textContent = t('card_delete');
   delBtn.addEventListener('click', () => openDeleteModal(acc));
   secondary.appendChild(delBtn);
 
@@ -842,14 +834,14 @@ function createAccountCard(acc) {
   const cdChips = document.createElement('div');
   cdChips.className = 'cooldown-chips';
   const cdLabel = document.createElement('span');
-  cdLabel.textContent = 'Cooldown:';
+  cdLabel.textContent = t('card_cooldown_label');
   cdChips.appendChild(cdLabel);
 
   const bucketSelect = document.createElement('select');
   bucketSelect.className = 'bucket-select';
-  bucketSelect.setAttribute('aria-label', 'Phạm vi cooldown');
+  bucketSelect.setAttribute('aria-label', 'Cooldown scope');
   for (const [bVal, bLabel] of [
-    ['all', 'Toàn acc'],
+    ['all', t('bucket_all')],
     ['pro', 'pro'],
     ['claude', 'claude'],
     ['flash', 'flash'],
@@ -1156,16 +1148,16 @@ async function refreshAgyHealth() {
   try {
     const data = await api('/api/agy/health');
     summaryEl.replaceChildren();
-    for (const [label, cls] of [
-      [`Khỏe mạnh: ${data.summary.healthy}`, 'badge-ready'],
-      [`Chờ refresh: ${data.summary.needs_refresh}`, 'badge-link'],
-      [`Chưa lưu: ${data.summary.missing_snapshot}`, 'badge-neutral'],
+    const summaryItems = [
+      [`${t('health_healthy')}: ${data.summary.healthy}`, 'badge-ready'],
+      [`${t('health_needs_refresh')}: ${data.summary.needs_refresh}`, 'badge-link'],
+      [`${t('health_missing')}: ${data.summary.missing_snapshot}`, 'badge-neutral'],
       [
-        `Mã hóa AES-256: ${data.summary.encrypted ?? 0}/${(data.summary.encrypted ?? 0) + (data.summary.unencrypted ?? 0)}`,
+        `AES-256: ${data.summary.encrypted ?? 0}/${(data.summary.encrypted ?? 0) + (data.summary.unencrypted ?? 0)}`,
         (data.summary.unencrypted ?? 0) === 0 ? 'badge-ready' : 'badge-cooldown',
       ],
-      [`Lỗi: ${data.summary.issues}`, data.summary.issues > 0 ? 'badge-danger' : 'badge-neutral'],
-    ]) {
+    ];
+    for (const [label, cls] of summaryItems) {
       const span = document.createElement('span');
       span.className = `badge ${cls}`;
       span.textContent = label;
@@ -1175,7 +1167,7 @@ async function refreshAgyHealth() {
     const encBtn = el('btn-encrypt-sessions');
     if (encBtn) {
       encBtn.hidden = !(data.summary.unencrypted > 0);
-      encBtn.textContent = `Mã hóa ${data.summary.unencrypted} phiên (AES-256-GCM)`;
+      encBtn.textContent = t('btn_encrypt_sessions', { count: data.summary.unencrypted });
     }
 
     if (data.lease) {
@@ -1193,11 +1185,11 @@ async function refreshAgyHealth() {
       listEl.appendChild(p);
     } else {
       const badgeMap = {
-        healthy: ['Khỏe mạnh', 'badge-ready'],
-        needs_refresh: ['Chờ refresh', 'badge-link'],
-        missing_snapshot: ['Chưa lưu', 'badge-neutral'],
-        email_mismatch: ['Lệch email', 'badge-danger'],
-        corrupt: ['Lỗi snapshot', 'badge-danger'],
+        healthy: [t('health_healthy'), 'badge-ready'],
+        needs_refresh: [t('health_needs_refresh'), 'badge-link'],
+        missing_snapshot: [t('health_missing'), 'badge-neutral'],
+        email_mismatch: [t('health_mismatch'), 'badge-danger'],
+        corrupt: [t('health_corrupt'), 'badge-danger'],
       };
       for (const acc of data.accounts) {
         const row = document.createElement('div');
@@ -1224,7 +1216,7 @@ async function refreshAgyHealth() {
         if (acc.captured) {
           const encBadge = document.createElement('span');
           encBadge.className = `badge ${acc.encrypted ? 'badge-accent' : 'badge-cooldown'}`;
-          encBadge.textContent = acc.encrypted ? 'AES-256' : 'Chưa mã hóa';
+          encBadge.textContent = acc.encrypted ? t('health_encrypted') : t('health_plain');
           title.appendChild(encBadge);
         }
 
@@ -1303,10 +1295,10 @@ async function refreshAnalytics() {
     const data = await api('/api/analytics?days=7');
     const s = data.summary;
     for (const [label, val] of [
-      ['Sẵn sàng hiện tại', `${s.availability_percent}% (${s.ready_accounts}/${s.total_accounts})`],
-      ['Lượt Switch / Nạp agy', `${s.total_switches} / ${s.total_agy_activations}`],
-      ['Đụng quota (7n / tổng)', `${s.quota_hits_window} / ${s.quota_hits_total}`],
-      ['Phiên agy mã hóa', `${s.agy_encrypted_accounts}/${s.agy_captured_accounts}`],
+      [t('analytics_avail'), `${s.availability_percent}% (${s.ready_accounts}/${s.total_accounts})`],
+      [t('analytics_ops'), `${s.total_switches} / ${s.total_agy_activations}`],
+      [t('analytics_quota'), `${s.quota_hits_window} / ${s.quota_hits_total}`],
+      [t('analytics_enc'), `${s.agy_encrypted_accounts}/${s.agy_captured_accounts}`],
     ]) {
       const box = document.createElement('div');
       box.className = 'analytics-stat';
@@ -1568,6 +1560,7 @@ async function openSettingsModal() {
     }
   }
   el('settings-form-error').hidden = true;
+  el('set-language').value = state.settings.language || getLang();
   el('set-keepalive-enabled').checked = Boolean(state.settings.keepalive_enabled);
   el('set-interval').value = String(state.settings.keepalive_interval_minutes);
   el('set-jitter').value = String(state.settings.keepalive_jitter_percent);
@@ -1631,12 +1624,31 @@ function connectSSE() {
   };
 }
 
+function initLanguage() {
+  applyStaticI18n();
+  el('btn-lang').addEventListener('click', async () => {
+    const next = getLang() === 'en' ? 'vi' : 'en';
+    setLang(next);
+    applyStaticI18n();
+    renderAll();
+    try {
+      const res = await api('/api/settings', {
+        method: 'PATCH',
+        body: JSON.stringify({ language: next }),
+      });
+      state.settings = res.settings;
+    } catch {
+      // Local preference still applied.
+    }
+  });
+}
+
 function initTheme() {
   const saved = localStorage.getItem('gpool_theme') || 'dark';
   document.documentElement.setAttribute('data-theme', saved);
   const btn = el('btn-theme');
   const syncThemeBtn = (theme) => {
-    btn.title = theme === 'dark' ? 'Chuyển sang giao diện Sáng' : 'Chuyển sang giao diện Tối';
+    btn.title = theme === 'dark' ? t('theme_to_light') : t('theme_to_dark');
   };
   syncThemeBtn(saved);
   btn.addEventListener('click', () => {
@@ -1918,7 +1930,7 @@ function bindEvents() {
     const list = el('events-list');
     const hidden = !list.hidden;
     list.hidden = hidden;
-    el('btn-toggle-events').textContent = hidden ? 'Mở rộng' : 'Thu gọn';
+    el('btn-toggle-events').textContent = hidden ? t('events_expand') : t('events_collapse');
   });
 
   for (const btn of document.querySelectorAll('[data-close-modal]')) {
@@ -1996,6 +2008,7 @@ function bindEvents() {
     errEl.hidden = true;
 
     const payload = {
+      language: el('set-language').value,
       keepalive_enabled: el('set-keepalive-enabled').checked,
       keepalive_interval_minutes: Number(el('set-interval').value),
       keepalive_jitter_percent: Number(el('set-jitter').value),
@@ -2015,9 +2028,9 @@ function bindEvents() {
         body: JSON.stringify(payload),
       });
       state.settings = res.settings;
+      syncLangFromSettings(res.settings);
       closeModal('settings-modal');
-      renderKeepAlivePill();
-      renderHeroPanel();
+      renderAll();
       showToast('Đã lưu cài đặt.', 'success');
     } catch (err) {
       errEl.textContent = err.message;
@@ -2212,6 +2225,7 @@ function updateBulkPreview() {
   return emails;
 }
 
+initLanguage();
 initTheme();
 bindEvents();
 connectSSE();

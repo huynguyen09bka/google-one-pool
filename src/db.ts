@@ -9,6 +9,7 @@ import {
   validateAlias,
   validateBucketName,
   validateEmail,
+  validateLocale,
   validatePlanTier,
   validateProxyUrl,
   validateRenewalDate,
@@ -22,6 +23,7 @@ import type {
   CreateAccountInput,
   DaemonSettings,
   EffectiveState,
+  Locale,
   PlanTier,
   PoolEvent,
   PoolExportPayload,
@@ -318,6 +320,15 @@ export class PoolDB {
       }
     }
 
+    let language: Locale = defaults.language;
+    if (typeof merged.language === 'string') {
+      try {
+        language = validateLocale(merged.language);
+      } catch {
+        language = defaults.language;
+      }
+    }
+
     return {
       keepalive_enabled: Boolean(merged.keepalive_enabled),
       keepalive_interval_minutes: clampNumber(merged.keepalive_interval_minutes, 10, 1440, defaults.keepalive_interval_minutes),
@@ -335,6 +346,7 @@ export class PoolDB {
           : defaults.default_open_url,
       rotation_policy: rotationPolicy,
       renewal_alert_days: clampNumber(merged.renewal_alert_days, 1, 90, defaults.renewal_alert_days),
+      language,
     };
   }
 
@@ -377,6 +389,10 @@ export class PoolDB {
         partial.renewal_alert_days !== undefined
           ? clampNumber(partial.renewal_alert_days, 1, 90, current.renewal_alert_days)
           : current.renewal_alert_days,
+      language:
+        partial.language !== undefined
+          ? validateLocale(partial.language)
+          : current.language,
     };
 
     const stmt = this.db.prepare(

@@ -14,7 +14,7 @@
           <div class="brand-mark" aria-hidden="true">G1P</div>
           <div class="brand-text">
             <h1>Google One Pool</h1>
-            <p class="subtitle">Quản lý pool Google AI Pro cho <code>agy</code> CLI &amp; Chrome</p>
+            <p class="subtitle" data-i18n-html="brand_subtitle_html">Quản lý pool Google AI Pro cho <code>agy</code> CLI &amp; Chrome</p>
           </div>
         </div>
 
@@ -22,7 +22,7 @@
           <div class="status-group">
             <div class="status-pill" id="sse-pill" title="Trạng thái kết nối thời gian thực với daemon">
               <span class="dot" id="sse-dot"></span>
-              <span id="sse-text">Đang kết nối...</span>
+              <span id="sse-text" data-i18n="sse_connecting">Đang kết nối...</span>
             </div>
             <div class="status-pill" id="keepalive-pill" title="Keep-alive nền tự làm mới phiên Chrome">
               <span class="dot dot-muted" id="keepalive-dot"></span>
@@ -30,18 +30,28 @@
             </div>
           </div>
           <div class="action-group">
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-analytics">Thống kê</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-agy-health">Sức khỏe agy</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-sweep">Quét phiên</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-chrome">Nhập Chrome</button>
-            <button type="button" class="btn btn-primary btn-sm" id="btn-add-account">+ Thêm</button>
-            <button type="button" class="btn btn-secondary btn-sm" id="btn-settings">Cài đặt</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-analytics" data-i18n="btn_analytics">Thống kê</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-agy-health" data-i18n="btn_agy_health">Sức khỏe agy</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-sweep" data-i18n="btn_sweep">Quét phiên</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-chrome" data-i18n="btn_import_chrome">Nhập Chrome</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-add-account" data-i18n="btn_add">+ Thêm</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-settings" data-i18n="btn_settings">Cài đặt</button>
+            <button
+              type="button"
+              class="btn btn-secondary btn-sm"
+              id="btn-lang"
+              data-i18n-title="lang_title"
+              title="Đổi ngôn ngữ (Tiếng Việt / English)"
+              aria-label="Switch language"
+            >
+              VI
+            </button>
             <button
               type="button"
               class="btn btn-icon btn-sm"
               id="btn-theme"
               title="Đổi giao diện Sáng / Tối"
-              aria-label="Đổi giao diện Sáng / Tối"
+              aria-label="Toggle Light / Dark theme"
             >
               ◐
             </button>
@@ -50,57 +60,58 @@
       </header>
 
       <main class="main-content">
-        <section class="hero-card" id="active-panel" aria-label="Tài khoản đang chọn">
+        <section class="hero-card" id="active-panel" aria-label="Active account">
           <div class="hero-main">
             <div class="hero-left">
               <div class="hero-eyebrow-row">
-                <span class="hero-eyebrow">TÀI KHOẢN ĐANG CHỌN</span>
+                <span class="hero-eyebrow" data-i18n="hero_eyebrow">TÀI KHOẢN ĐANG CHỌN</span>
                 <span class="badge badge-neutral" id="hero-agy-keychain" hidden></span>
                 <span class="badge badge-cooldown" id="hero-agy-lease" hidden></span>
                 <span class="badge badge-danger" id="hero-renewal-alert" hidden></span>
               </div>
               <div class="hero-title-row">
-                <h2 id="active-alias">Chưa chọn tài khoản</h2>
+                <h2 id="active-alias" data-i18n="hero_none">Chưa chọn tài khoản</h2>
                 <span class="badge badge-neutral" id="active-status-badge">—</span>
                 <span class="badge badge-accent" id="active-plan-badge" hidden>Google AI Pro</span>
                 <span class="badge badge-neutral" id="active-mode-badge" hidden></span>
                 <span class="badge badge-ready" id="active-agy-badge" hidden></span>
               </div>
-              <p class="hero-email" id="active-email">Hãy nhập tài khoản từ Chrome hoặc thêm thủ công ở danh sách bên dưới.</p>
+              <p class="hero-email" id="active-email" data-i18n="hero_none_email">Hãy nhập tài khoản từ Chrome hoặc thêm thủ công ở danh sách bên dưới.</p>
               <p class="hero-meta" id="active-meta"></p>
             </div>
 
             <div class="hero-buttons">
-              <button type="button" class="btn btn-warning" id="btn-rotate-agy-next" disabled title="Đặt cooldown acc hiện tại, chọn acc đã lưu agy kế tiếp và nạp thẳng vào Keychain (không bật Chrome)">
+              <button type="button" class="btn btn-warning" id="btn-rotate-agy-next" disabled>
                 Xoay agy kế (+5h)
               </button>
-              <button type="button" class="btn btn-secondary" id="btn-rotate-next" disabled title="Đặt cooldown acc hiện tại và mở Chrome acc kế tiếp">
+              <button type="button" class="btn btn-secondary" id="btn-rotate-next" disabled data-i18n="hero_rotate_chrome">
                 Đổi Chrome kế
               </button>
-              <button type="button" class="btn btn-secondary" id="btn-active-agy" disabled>
+              <button type="button" class="btn btn-secondary" id="btn-active-agy" disabled data-i18n="hero_agy_activate">
                 Nạp phiên agy
               </button>
-              <button type="button" class="btn btn-secondary" id="btn-active-open" disabled>
+              <button type="button" class="btn btn-secondary" id="btn-active-open" disabled data-i18n="hero_open_chrome">
                 Mở Chrome Profile
               </button>
             </div>
           </div>
 
           <div class="oauth-bar">
-            <div class="oauth-guide">
+            <div class="oauth-guide" data-i18n-html="hero_oauth_guide_html">
               <strong>Luồng <code>agy</code> CLI:</strong>
-              Đổi acc đã lưu bằng <strong>Nạp phiên agy</strong> hoặc <code>gpool run &lt;alias&gt; -- agy</code> (đóng <code>agy</code> trước, <strong>không dùng <code>/logout</code></strong> vì sẽ thu hồi token).
+              Đổi acc đã lưu bằng <strong>Nạp phiên agy</strong> hoặc <code>gpool agy</code> (đóng <code>agy</code> trước, <strong>không dùng <code>/logout</code></strong> vì sẽ thu hồi token).
               Chỉ dán link OAuth bên dưới khi đăng nhập lần đầu, sau đó bấm <strong>Lưu phiên agy</strong>.
             </div>
             <form class="oauth-form" id="oauth-form">
-              <select id="oauth-account-select" aria-label="Chọn tài khoản mở OAuth"></select>
+              <select id="oauth-account-select" aria-label="Account for OAuth"></select>
               <input
                 type="url"
                 id="oauth-url-input"
+                data-i18n-placeholder="oauth_placeholder"
                 placeholder="Dán link OAuth (https://accounts.google.com/o/oauth2/...) khi đăng nhập lần đầu"
                 autocomplete="off"
               />
-              <button type="submit" class="btn btn-primary" id="btn-oauth-submit">Mở OAuth vào Profile</button>
+              <button type="submit" class="btn btn-primary" id="btn-oauth-submit" data-i18n="oauth_submit">Mở OAuth vào Profile</button>
             </form>
           </div>
         </section>
@@ -114,7 +125,7 @@
             </div>
             <div class="wizard-head-actions">
               <button type="button" class="btn btn-secondary btn-sm" id="btn-wizard-isolate-all" hidden></button>
-              <button type="button" class="btn btn-ghost btn-sm" id="btn-wizard-dismiss">Ẩn tạm</button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-wizard-dismiss" data-i18n="wizard_dismiss">Ẩn tạm</button>
             </div>
           </div>
 
@@ -130,65 +141,66 @@
               <code class="wizard-profile-path" id="wizard-target-path"></code>
             </div>
             <div class="wizard-actions">
-              <button type="button" class="btn btn-primary" id="btn-wizard-open">
+              <button type="button" class="btn btn-primary" id="btn-wizard-open" data-i18n="wizard_open_btn">
                 1. Mở Chrome acc này (điền sẵn email)
               </button>
-              <button type="button" class="btn btn-warning" id="btn-wizard-done-next">
+              <button type="button" class="btn btn-warning" id="btn-wizard-done-next" data-i18n="wizard_done_btn">
                 2. Đã đăng nhập xong → Mở acc tiếp theo
               </button>
-              <button type="button" class="btn btn-ghost" id="btn-wizard-skip">
+              <button type="button" class="btn btn-ghost" id="btn-wizard-skip" data-i18n="wizard_skip_btn">
                 Bỏ qua acc này
               </button>
             </div>
           </div>
         </section>
 
-        <section class="kpi-grid" aria-label="Thống kê nhanh">
+        <section class="kpi-grid" aria-label="Summary metrics">
           <button type="button" class="kpi-card kpi-interactive" data-kpi-filter="all">
-            <span class="kpi-label">Tổng tài khoản</span>
+            <span class="kpi-label" data-i18n="kpi_total">Tổng tài khoản</span>
             <strong class="kpi-value" id="kpi-total">0</strong>
           </button>
           <button type="button" class="kpi-card kpi-good kpi-interactive" data-kpi-filter="ready">
-            <span class="kpi-label">Sẵn sàng</span>
+            <span class="kpi-label" data-i18n="kpi_ready">Sẵn sàng</span>
             <strong class="kpi-value" id="kpi-ready">0</strong>
           </button>
           <button type="button" class="kpi-card kpi-warn kpi-interactive" data-kpi-filter="cooldown">
-            <span class="kpi-label">Đang Cooldown</span>
+            <span class="kpi-label" data-i18n="kpi_cooldown">Đang Cooldown</span>
             <strong class="kpi-value" id="kpi-cooldown">0</strong>
           </button>
           <button type="button" class="kpi-card kpi-danger kpi-interactive" data-kpi-filter="needs_login">
-            <span class="kpi-label">Cần đăng nhập / Lỗi</span>
+            <span class="kpi-label" data-i18n="kpi_needs_login">Cần đăng nhập / Lỗi</span>
             <strong class="kpi-value" id="kpi-needs-login">0</strong>
           </button>
         </section>
 
-        <section class="toolbar" aria-label="Tìm kiếm và lọc tài khoản">
+        <section class="toolbar" aria-label="Search and filter">
           <div class="search-wrap">
             <input
               type="search"
               id="search-input"
+              data-i18n-placeholder="search_placeholder"
               placeholder="Tìm theo alias, email, tag, ghi chú... (⌘K)"
               autocomplete="off"
             />
           </div>
 
           <div class="filter-group" id="status-filters">
-            <button type="button" class="chip chip-active" data-status="all">Tất cả</button>
-            <button type="button" class="chip" data-status="ready">Sẵn sàng</button>
-            <button type="button" class="chip" data-status="cooldown">Cooldown</button>
-            <button type="button" class="chip" data-status="needs_login">Cần đăng nhập</button>
-            <button type="button" class="chip" data-status="unknown" id="chip-status-unknown" hidden>Chưa kiểm tra</button>
+            <button type="button" class="chip chip-active" data-status="all" data-i18n="filter_all">Tất cả</button>
+            <button type="button" class="chip" data-status="ready" data-i18n="filter_ready">Sẵn sàng</button>
+            <button type="button" class="chip" data-status="cooldown" data-i18n="filter_cooldown">Cooldown</button>
+            <button type="button" class="chip" data-status="needs_login" data-i18n="filter_needs_login">Cần đăng nhập</button>
+            <button type="button" class="chip" data-status="unknown" id="chip-status-unknown" data-i18n="filter_unknown" hidden>Chưa kiểm tra</button>
           </div>
 
           <div class="filter-group" id="tag-filters"></div>
         </section>
 
-        <section class="account-grid" id="account-grid" aria-label="Danh sách tài khoản"></section>
+        <section class="account-grid" id="account-grid" aria-label="Accounts list"></section>
 
         <section class="events-card">
           <div class="events-header">
-            <h3>Nhật ký hoạt động gần đây</h3>
-            <button type="button" class="btn btn-ghost btn-sm" id="btn-toggle-events">Thu gọn</button>
+            <h3 data-i18n="events_title">Nhật ký hoạt động gần đây</h3>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-toggle-events" data-i18n="events_collapse">Thu gọn</button>
           </div>
           <ul class="events-list" id="events-list"></ul>
         </section>
@@ -419,66 +431,73 @@
     <div class="modal-backdrop" id="settings-modal" hidden>
       <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
         <div class="modal-header">
-          <h3 id="settings-modal-title">Cài đặt hệ thống &amp; Sao lưu</h3>
-          <button type="button" class="btn btn-icon" data-close-modal="settings-modal" aria-label="Đóng">✕</button>
+          <h3 id="settings-modal-title" data-i18n="modal_settings_title">Cài đặt hệ thống &amp; Sao lưu</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="settings-modal" aria-label="Close">✕</button>
         </div>
         <form id="settings-form" class="modal-body">
           <div class="form-grid">
+            <label class="full-span">
+              <span data-i18n="set_language_label">Ngôn ngữ giao diện / Language</span>
+              <select id="set-language">
+                <option value="vi">Tiếng Việt (vi)</option>
+                <option value="en">English (en)</option>
+              </select>
+            </label>
             <label class="checkbox-row full-span">
               <input type="checkbox" id="set-keepalive-enabled" />
-              <span>Bật Keep-Alive nền tự kiểm tra &amp; làm mới cookie định kỳ</span>
+              <span data-i18n="set_keepalive_label">Bật Keep-Alive nền tự kiểm tra &amp; làm mới cookie định kỳ</span>
             </label>
             <label>
-              <span>Chu kỳ Keep-Alive (phút)</span>
+              <span data-i18n="set_interval_label">Chu kỳ Keep-Alive (phút)</span>
               <input type="number" id="set-interval" min="10" max="1440" />
             </label>
             <label>
-              <span>Độ lệch ngẫu nhiên (Jitter %)</span>
+              <span data-i18n="set_jitter_label">Độ lệch ngẫu nhiên (Jitter %)</span>
               <input type="number" id="set-jitter" min="0" max="50" />
             </label>
             <label>
-              <span>Giãn cách giữa các acc (giây)</span>
+              <span data-i18n="set_stagger_label">Giãn cách giữa các acc (giây)</span>
               <input type="number" id="set-stagger" min="0" max="300" />
             </label>
             <label>
-              <span>Cooldown mặc định khi hết quota (giờ)</span>
+              <span data-i18n="set_cooldown_label">Cooldown mặc định khi hết quota (giờ)</span>
               <input type="number" id="set-cooldown-hours" min="0.25" max="720" step="0.25" />
             </label>
             <label>
-              <span>Chiến lược xoay vòng tài khoản</span>
+              <span data-i18n="set_policy_label">Chiến lược xoay vòng tài khoản</span>
               <select id="set-rotation-policy">
-                <option value="lru">LRU — Ít dùng gần đây nhất (mặc định)</option>
-                <option value="round-robin">Round-Robin — Chia đều lượt sử dụng</option>
-                <option value="tier-first">Ưu tiên gói cao (Enterprise → Ultra → Pro)</option>
+                <option value="lru">LRU — Least recently used</option>
+                <option value="round-robin">Round-Robin — Even usage</option>
+                <option value="tier-first">Tier-First (Enterprise → Ultra → Pro)</option>
               </select>
             </label>
             <label>
-              <span>Cảnh báo ngày gia hạn trước (ngày)</span>
+              <span data-i18n="set_renewal_days_label">Cảnh báo ngày gia hạn trước (ngày)</span>
               <input type="number" id="set-renewal-alert-days" min="1" max="90" />
             </label>
             <label class="checkbox-row full-span">
               <input type="checkbox" id="set-notify" />
-              <span>Gửi thông báo macOS khi phát hiện tài khoản bị mất phiên</span>
+              <span data-i18n="set_notify_label">Gửi thông báo macOS khi phát hiện tài khoản bị mất phiên</span>
             </label>
             <label class="full-span">
-              <span>Đường dẫn Google Chrome / Brave</span>
+              <span data-i18n="set_chrome_bin_label">Đường dẫn Google Chrome / Brave</span>
               <input type="text" id="set-chrome-bin" />
             </label>
             <label class="full-span">
-              <span>URL mở mặc định khi chuyển tài khoản</span>
+              <span data-i18n="set_open_url_label">URL mở mặc định khi chuyển tài khoản</span>
               <input type="url" id="set-open-url" />
             </label>
           </div>
 
           <div class="backup-box">
             <div>
-              <strong>Sao lưu / Khôi phục danh sách (chỉ metadata, không xuất cookie)</strong>
-              <p class="muted-small">Xuất file JSON để sao lưu danh sách email, tag, ghi chú và ngày gia hạn.</p>
+              <strong data-i18n="backup_meta_title">Sao lưu / Khôi phục danh sách (chỉ metadata, không xuất cookie)</strong>
+              <p class="muted-small" data-i18n="backup_meta_sub">Xuất file JSON để sao lưu danh sách email, tag, ghi chú và ngày gia hạn.</p>
             </div>
             <div class="backup-actions">
-              <button type="button" class="btn btn-secondary btn-sm" id="btn-export-json">Xuất JSON</button>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-export-json" data-i18n="btn_export_json">Xuất JSON</button>
               <label class="btn btn-secondary btn-sm file-btn">
-                Nhập JSON
+                <span data-i18n="btn_import_json">Nhập JSON</span>
                 <input type="file" id="input-import-json" accept="application/json,.json" hidden />
               </label>
             </div>
@@ -486,20 +505,21 @@
 
           <div class="backup-box">
             <div style="flex: 1 1 240px;">
-              <strong>Backup mã hóa AES-256-GCM (chuyển máy kèm phiên agy)</strong>
-              <p class="muted-small">Dùng mật khẩu riêng (≥ 6 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.</p>
+              <strong data-i18n="backup_enc_title">Backup mã hóa AES-256-GCM (chuyển máy kèm phiên agy)</strong>
+              <p class="muted-small" data-i18n="backup_enc_sub">Dùng mật khẩu riêng (≥ 6 ký tự) để đóng gói cả metadata + toàn bộ snapshot agy an toàn.</p>
             </div>
             <div class="encrypted-backup-controls">
               <input
                 type="password"
                 id="backup-passphrase"
+                data-i18n-placeholder="backup_pass_placeholder"
                 placeholder="Mật khẩu mã hóa / giải mã (≥ 6 ký tự)"
                 autocomplete="new-password"
               />
               <div class="backup-actions">
-                <button type="button" class="btn btn-primary btn-sm" id="btn-export-encrypted">Xuất mã hóa (+agy)</button>
+                <button type="button" class="btn btn-primary btn-sm" id="btn-export-encrypted" data-i18n="btn_export_enc">Xuất mã hóa (+agy)</button>
                 <label class="btn btn-secondary btn-sm file-btn">
-                  Nhập mã hóa
+                  <span data-i18n="btn_import_enc">Nhập mã hóa</span>
                   <input type="file" id="input-import-encrypted" accept="application/json,.json,.enc" hidden />
                 </label>
               </div>
@@ -508,8 +528,8 @@
 
           <p class="form-error" id="settings-form-error" hidden></p>
           <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" data-close-modal="settings-modal">Đóng</button>
-            <button type="submit" class="btn btn-primary" id="btn-save-settings">Lưu cài đặt</button>
+            <button type="button" class="btn btn-secondary" data-close-modal="settings-modal" data-i18n="btn_close">Đóng</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-settings" data-i18n="btn_save_settings">Lưu cài đặt</button>
           </div>
         </form>
       </div>
@@ -519,18 +539,18 @@
     <div class="modal-backdrop" id="delete-modal" hidden>
       <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
         <div class="modal-header">
-          <h3 id="delete-modal-title">Xóa tài khoản</h3>
-          <button type="button" class="btn btn-icon" data-close-modal="delete-modal" aria-label="Đóng">✕</button>
+          <h3 id="delete-modal-title" data-i18n="modal_delete_title">Xóa tài khoản</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="delete-modal" aria-label="Close">✕</button>
         </div>
         <div class="modal-body">
           <p id="delete-message">Bạn chắc chắn muốn xóa tài khoản này khỏi pool?</p>
           <label class="checkbox-row" id="delete-purge-wrap">
             <input type="checkbox" id="delete-purge-profile" />
-            <span>Xóa luôn thư mục Chrome profile (chỉ áp dụng cho profile tách riêng, không bao giờ xóa Chrome gốc)</span>
+            <span data-i18n="delete_purge_label">Xóa luôn thư mục Chrome profile (chỉ áp dụng cho profile tách riêng, không bao giờ xóa Chrome gốc)</span>
           </label>
           <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" data-close-modal="delete-modal">Hủy</button>
-            <button type="button" class="btn btn-danger" id="btn-confirm-delete">Xóa tài khoản</button>
+            <button type="button" class="btn btn-secondary" data-close-modal="delete-modal" data-i18n="btn_cancel">Hủy</button>
+            <button type="button" class="btn btn-danger" id="btn-confirm-delete" data-i18n="modal_delete_title">Xóa tài khoản</button>
           </div>
         </div>
       </div>
@@ -540,26 +560,26 @@
     <div class="modal-backdrop" id="agy-health-modal" hidden>
       <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="agy-health-title">
         <div class="modal-header">
-          <h3 id="agy-health-title">Sức khỏe phiên agy &amp; Khóa agy.lock</h3>
-          <button type="button" class="btn btn-icon" data-close-modal="agy-health-modal" aria-label="Đóng">✕</button>
+          <h3 id="agy-health-title" data-i18n="modal_health_title">Sức khỏe phiên agy &amp; Khóa agy.lock</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="agy-health-modal" aria-label="Close">✕</button>
         </div>
         <div class="modal-body">
           <div class="health-summary-bar" id="health-summary-bar"></div>
           <div class="notice-box" id="health-lease-box" hidden>
             <p id="health-lease-text"></p>
-            <button type="button" class="btn btn-danger btn-sm" id="btn-unlock-lease">Mở khóa agy.lock</button>
+            <button type="button" class="btn btn-danger btn-sm" id="btn-unlock-lease" data-i18n="btn_unlock_lease">Mở khóa agy.lock</button>
           </div>
           <div class="health-list" id="health-list"></div>
           <div class="notice-box" id="health-renewals-box" hidden>
-            <strong>Cảnh báo ngày gia hạn gói:</strong>
+            <strong>Renewal Alerts:</strong>
             <div id="health-renewals-list"></div>
           </div>
           <div class="modal-footer">
             <button type="button" class="btn btn-success-soft" id="btn-encrypt-sessions" hidden>
               Mã hóa tất cả (AES-256-GCM)
             </button>
-            <button type="button" class="btn btn-secondary" id="btn-refresh-health">Kiểm tra lại</button>
-            <button type="button" class="btn btn-primary" data-close-modal="agy-health-modal">Đóng</button>
+            <button type="button" class="btn btn-secondary" id="btn-refresh-health" data-i18n="btn_refresh_health">Kiểm tra lại</button>
+            <button type="button" class="btn btn-primary" data-close-modal="agy-health-modal" data-i18n="btn_close">Đóng</button>
           </div>
         </div>
       </div>
@@ -569,19 +589,19 @@
     <div class="modal-backdrop" id="analytics-modal" hidden>
       <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="analytics-title">
         <div class="modal-header">
-          <h3 id="analytics-title">Thống kê &amp; Hiệu suất Pool (7 ngày gần đây)</h3>
-          <button type="button" class="btn btn-icon" data-close-modal="analytics-modal" aria-label="Đóng">✕</button>
+          <h3 id="analytics-title" data-i18n="modal_analytics_title">Thống kê &amp; Hiệu suất Pool (7 ngày gần đây)</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="analytics-modal" aria-label="Close">✕</button>
         </div>
         <div class="modal-body">
           <div class="analytics-kpi-row" id="analytics-kpis"></div>
           <div class="analytics-chart-card">
-            <div class="analytics-chart-title">Hoạt động theo ngày (Switch + Nạp agy vs Đụng quota)</div>
+            <div class="analytics-chart-title" data-i18n="analytics_chart_title">Hoạt động theo ngày (Switch + Nạp agy vs Đụng quota)</div>
             <div class="analytics-bars" id="analytics-bars"></div>
           </div>
           <div class="health-list" id="analytics-accounts"></div>
           <div class="modal-footer">
-            <button type="button" class="btn btn-secondary" id="btn-refresh-analytics">Làm mới</button>
-            <button type="button" class="btn btn-primary" data-close-modal="analytics-modal">Đóng</button>
+            <button type="button" class="btn btn-secondary" id="btn-refresh-analytics" data-i18n="btn_refresh">Làm mới</button>
+            <button type="button" class="btn btn-primary" data-close-modal="analytics-modal" data-i18n="btn_close">Đóng</button>
           </div>
         </div>
       </div>

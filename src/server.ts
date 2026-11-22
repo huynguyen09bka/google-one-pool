@@ -85,6 +85,7 @@ const STATIC_ROUTE_FILES: Record<string, string> = {
   '/index.html': 'index.html',
   '/styles.css': 'styles.css',
   '/app.js': 'app.js',
+  '/i18n.js': 'i18n.js',
 };
 
 export function createDaemonServer(options: CreateDaemonServerOptions): DaemonServerHandle {

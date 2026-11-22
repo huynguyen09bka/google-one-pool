@@ -1,6 +1,8 @@
 # Hướng dẫn sử dụng CLI & TUI (`gpool`)
 
-Tài liệu này hướng dẫn chi tiết cách cài đặt, sử dụng **giao diện TUI tương tác** (`gpool` / `gpool tui`) và toàn bộ **lệnh CLI `gpool`** để quản lý pool tài khoản Google AI Pro cho `agy` CLI, `gemini` CLI và Google Chrome trên macOS.
+[English](./CLI-GUIDE.en.md) | **Tiếng Việt**
+
+Tài liệu này hướng dẫn chi tiết cách cài đặt, sử dụng **giao diện TUI tương tác** (`gpool` / `gpool tui`) và toàn bộ **lệnh CLI `gpool`** để quản lý pool tài khoản Google AI Pro cho `agy` CLI, `gemini` CLI và Google Chrome trên macOS. Hệ thống hỗ trợ đầy đủ **Tiếng Việt & English** (`gpool lang vi|en`).
 
 ---
 
@@ -35,14 +37,14 @@ node -v
 **Cách 1 — Thêm `alias` vào `~/.zshrc` (nhanh nhất):**
 
 ```bash
-echo 'alias gpool="node /Users/huynguyen-max/Documents/GitHub/google-one-pool/bin/gpool.ts"' >> ~/.zshrc
+echo 'alias gpool="node /path/to/google-one-pool/bin/gpool.ts"' >> ~/.zshrc
 source ~/.zshrc
 ```
 
 **Cách 2 — Dùng `npm link`:**
 
 ```bash
-cd /Users/huynguyen-max/Documents/GitHub/google-one-pool
+cd /path/to/google-one-pool
 chmod +x bin/gpool.ts
 npm link
 ```
@@ -214,20 +216,21 @@ gpool agy-lock unlock
   "mcpServers": {
     "google-one-pool": {
       "command": "node",
-      "args": ["/Users/huynguyen-max/Documents/GitHub/google-one-pool/bin/gpool.ts", "mcp"]
+      "args": ["/path/to/google-one-pool/bin/gpool.ts", "mcp"]
     }
   }
 }
 ```
 
-7 tools được cung cấp qua MCP:
+8 tools được cung cấp qua MCP:
 - `pool_status`: tổng quan pool, acc active, chủ Keychain `agy`, trạng thái khóa `agy.lock`, mốc hết cooldown gần nhất.
-- `agy_health`: kiểm tra sức khỏe toàn bộ snapshot (`refresh_token`, hạn `access_token`, khớp email) và cảnh báo gia hạn.
+- `agy_health`: kiểm tra sức khỏe toàn bộ snapshot (`refresh_token`, hạn `access_token`, khớp email, mã hóa AES-256) và cảnh báo gia hạn.
 - `agy_acquire`: chọn acc tốt nhất (lọc theo `tag`, `bucket`, `policy`), giữ khóa `agy.lock`, nạp Keychain.
 - `agy_release`: giải phóng khóa `agy.lock`.
 - `agy_report_quota`: báo lỗi hết quota (tự parse thời gian reset & bucket từ `error_text`), đặt cooldown và tự xoay + nạp Keychain sang acc kế tiếp.
 - `agy_clear_cooldown`: gỡ cooldown toàn tài khoản hoặc theo bucket.
 - `agy_run`: chạy 1 job `agy` trọn gói có tự động failover nhiều tài khoản.
+- `pool_analytics`: xem thống kê hiệu suất & tỷ lệ đụng quota 7 ngày gần đây.
 
 ### Quy trình C — Chuyển từ `linked` sang `isolated` để Keep-Alive chạy ngầm độc lập
 

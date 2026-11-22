@@ -15,6 +15,8 @@ export type ProfileMode = 'isolated' | 'linked';
 
 export type RotationPolicy = 'lru' | 'round-robin' | 'tier-first';
 
+export type Locale = 'vi' | 'en';
+
 export interface BucketCooldown {
   bucket: string;
   cooldown_until: string;
@@ -245,6 +247,7 @@ export interface DaemonSettings {
   default_open_url: string;
   rotation_policy: RotationPolicy;
   renewal_alert_days: number;
+  language: Locale;
 }
 
 export interface SwitchResult {

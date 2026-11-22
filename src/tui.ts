@@ -30,6 +30,7 @@ import {
   type PoolPaths,
 } from './config.ts';
 import { PoolDB } from './db.ts';
+import { pick } from './i18n.ts';
 import { KeepAliveScheduler } from './keepalive.ts';
 import { getLaunchAgentStatus, installLaunchAgent, uninstallLaunchAgent } from './launchagent.ts';
 import { PoolSwitcher } from './switcher.ts';
@@ -40,6 +41,7 @@ import type {
   BulkImportItemInput,
   BulkImportResult,
   DaemonSettings,
+  Locale,
   PlanTier,
   PoolAnalyticsReport,
   PoolEvent,
@@ -82,6 +84,7 @@ export interface TuiSnapshot {
 
 export interface TuiState {
   snapshot: TuiSnapshot | null;
+  locale?: Locale;
   selectedIndex: number;
   scrollOffset: number;
   filterStatus: TuiStatusFilter;
@@ -290,43 +293,43 @@ function boxBottom(width: number, borderColor = ANSI.gray): string {
   return paint(borderColor, '└' + '─'.repeat(Math.max(4, width - 2)) + '┘');
 }
 
-function formatStateLabel(acc: AccountView): string {
+function formatStateLabel(acc: AccountView, lang: Locale = 'vi'): string {
   switch (acc.effective_state) {
     case 'active':
-      return paint(ANSI.brightBlue + ANSI.bold, '★ Đang chọn');
+      return paint(ANSI.brightBlue + ANSI.bold, pick(lang, '★ Đang chọn', '★ Active'));
     case 'ready':
-      return paint(ANSI.brightGreen, '● Sẵn sàng');
+      return paint(ANSI.brightGreen, pick(lang, '● Sẵn sàng', '● Ready'));
     case 'cooldown':
       return paint(ANSI.yellow, `◐ CD ${formatShortDuration(acc.cooldown_remaining_ms)}`);
     case 'needs_login':
-      return paint(ANSI.red, '✕ Cần login');
+      return paint(ANSI.red, pick(lang, '✕ Cần login', '✕ Needs login'));
     case 'error':
-      return paint(ANSI.red, '! Lỗi quét');
+      return paint(ANSI.red, pick(lang, '! Lỗi quét', '! Error'));
     case 'checking':
-      return paint(ANSI.cyan, '◌ Đang quét');
+      return paint(ANSI.cyan, pick(lang, '◌ Đang quét', '◌ Checking'));
     default:
-      return paint(ANSI.gray, '○ Chưa quét');
+      return paint(ANSI.gray, pick(lang, '○ Chưa quét', '○ Unchecked'));
   }
 }
 
-function formatAgyCell(acc: AccountView): string {
+function formatAgyCell(acc: AccountView, lang: Locale = 'vi'): string {
   if (!acc.agy_session?.captured) return paint(ANSI.gray, '—');
-  if (acc.agy_session.is_live_owner) return paint(ANSI.brightGreen + ANSI.bold, '★ đang dùng');
-  return paint(ANSI.cyan, '● đã lưu');
+  if (acc.agy_session.is_live_owner) return paint(ANSI.brightGreen + ANSI.bold, pick(lang, '★ đang dùng', '★ live'));
+  return paint(ANSI.cyan, pick(lang, '● đã lưu', '● saved'));
 }
 
-function formatFilterName(filter: TuiStatusFilter): string {
+function formatFilterName(filter: TuiStatusFilter, lang: Locale = 'vi'): string {
   switch (filter) {
     case 'all':
-      return 'Tất cả';
+      return pick(lang, 'Tất cả', 'All');
     case 'ready':
-      return 'Sẵn sàng';
+      return pick(lang, 'Sẵn sàng', 'Ready');
     case 'cooldown':
       return 'Cooldown';
     case 'needs_login':
-      return 'Cần login/Lỗi';
+      return pick(lang, 'Cần login/Lỗi', 'Needs login/Err');
     case 'unknown':
-      return 'Chưa quét';
+      return pick(lang, 'Chưa quét', 'Unchecked');
   }
 }
 
@@ -350,46 +353,48 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
   const height = Math.max(20, rows);
   const innerW = width - 4;
   const snap = state.snapshot;
+  const lang: Locale = state.locale ?? snap?.settings?.language ?? 'vi';
+  const tr = (vi: string, en: string) => pick(lang, vi, en);
   const lines: string[] = [];
 
   // ── Header ───────────────────────────────────────────────
-  lines.push(boxTop('Google One Pool (gpool) — TUI', width, ANSI.blue));
+  lines.push(boxTop(`Google One Pool (gpool) — TUI [${lang.toUpperCase()}]`, width, ANSI.blue));
 
   if (!snap) {
-    lines.push(boxLine(paint(ANSI.yellow, 'Đang tải dữ liệu pool...'), innerW, ANSI.blue));
+    lines.push(boxLine(paint(ANSI.yellow, tr('Đang tải dữ liệu pool...', 'Loading pool data...')), innerW, ANSI.blue));
     lines.push(boxBottom(width, ANSI.blue));
     return lines;
   }
 
   const daemonTag = snap.daemonOnline
     ? paint(ANSI.brightGreen, '● Daemon Online')
-    : paint(ANSI.yellow, '○ Local DB (Daemon tắt)');
+    : paint(ANSI.yellow, tr('○ Local DB (Daemon tắt)', '○ Local DB (Daemon off)'));
   const kaTag = snap.keepalive.sweeping
-    ? paint(ANSI.cyan, '◌ Đang quét phiên...')
+    ? paint(ANSI.cyan, tr('◌ Đang quét phiên...', '◌ Sweeping...'))
     : snap.settings.keepalive_enabled
-      ? paint(ANSI.green, `Keep-Alive ${snap.settings.keepalive_interval_minutes}p`)
-      : paint(ANSI.gray, 'Keep-Alive tắt');
+      ? paint(ANSI.green, `Keep-Alive ${snap.settings.keepalive_interval_minutes}${tr('p', 'm')}`)
+      : paint(ANSI.gray, tr('Keep-Alive tắt', 'Keep-Alive off'));
   const agyOwner = snap.agyStatus?.live_owner_alias
     ? paint(ANSI.brightGreen, `agy: ${snap.agyStatus.live_owner_alias}`)
     : snap.agyStatus?.keychain_present
-      ? paint(ANSI.yellow, `agy: ${snap.agyStatus.live_email ?? 'chưa lưu'}`)
-      : paint(ANSI.gray, 'agy: trống');
+      ? paint(ANSI.yellow, `agy: ${snap.agyStatus.live_email ?? tr('chưa lưu', 'uncaptured')}`)
+      : paint(ANSI.gray, tr('agy: trống', 'agy: empty'));
   const lockTag =
     snap.agyLease && !snap.agyLease.stale
       ? `  │  ${paint(ANSI.yellow + ANSI.bold, `lock: ${snap.agyLease.holder}`)}`
       : '';
 
   const kpiParts = [
-    `Tổng: ${paint(ANSI.bold, String(snap.summary.total))}`,
-    paint(ANSI.brightGreen, `Sẵn sàng: ${snap.summary.ready}`),
+    `${tr('Tổng', 'Total')}: ${paint(ANSI.bold, String(snap.summary.total))}`,
+    paint(ANSI.brightGreen, `${tr('Sẵn sàng', 'Ready')}: ${snap.summary.ready}`),
     paint(ANSI.yellow, `Cooldown: ${snap.summary.cooldown}`),
-    paint(ANSI.red, `Cần login: ${snap.summary.needs_login + snap.summary.error}`),
+    paint(ANSI.red, `${tr('Cần login', 'Needs login')}: ${snap.summary.needs_login + snap.summary.error}`),
   ];
 
   lines.push(boxLine(`${daemonTag}  │  ${kaTag}  │  ${agyOwner}${lockTag}`, innerW, ANSI.blue));
-  const filterInfo = `Lọc: ${paint(ANSI.cyan, formatFilterName(state.filterStatus))}` +
+  const filterInfo = `${tr('Lọc', 'Filter')}: ${paint(ANSI.cyan, formatFilterName(state.filterStatus, lang))}` +
     (state.searchQuery || state.searchActive
-      ? `  │  Tìm: ${paint(ANSI.bold + ANSI.yellow, state.searchQuery)}${state.searchActive ? paint(ANSI.inverse, ' ') : ''}`
+      ? `  │  ${tr('Tìm', 'Search')}: ${paint(ANSI.bold + ANSI.yellow, state.searchQuery)}${state.searchActive ? paint(ANSI.inverse, ' ') : ''}`
       : '');
   lines.push(boxLine(`${kpiParts.join('  •  ')}  │  ${filterInfo}`, innerW, ANSI.blue));
   lines.push(boxBottom(width, ANSI.blue));
@@ -429,16 +434,16 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
 
   const tableTitle =
     filtered.length === snap.accounts.length
-      ? `Danh sách tài khoản (${filtered.length})`
-      : `Danh sách tài khoản (${filtered.length}/${snap.accounts.length})`;
+      ? `${tr('Danh sách tài khoản', 'Accounts')} (${filtered.length})`
+      : `${tr('Danh sách tài khoản', 'Accounts')} (${filtered.length}/${snap.accounts.length})`;
   lines.push(boxTop(tableTitle, width, ANSI.gray));
 
   const headerCols = [
     '   ',
     padRightWidth(paint(ANSI.bold + ANSI.gray, 'ALIAS'), aliasW),
     padRightWidth(paint(ANSI.bold + ANSI.gray, 'EMAIL'), emailW),
-    padRightWidth(paint(ANSI.bold + ANSI.gray, 'TRẠNG THÁI'), stateW),
-    padRightWidth(paint(ANSI.bold + ANSI.gray, 'CHẾ ĐỘ'), modeW),
+    padRightWidth(paint(ANSI.bold + ANSI.gray, tr('TRẠNG THÁI', 'STATUS')), stateW),
+    padRightWidth(paint(ANSI.bold + ANSI.gray, tr('CHẾ ĐỘ', 'MODE')), modeW),
     padRightWidth(paint(ANSI.bold + ANSI.gray, 'AGY'), agyW),
   ];
   if (tagsW > 0) headerCols.push(padRightWidth(paint(ANSI.bold + ANSI.gray, 'TAGS'), tagsW));
@@ -448,8 +453,14 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
   if (filtered.length === 0) {
     const emptyMsg =
       snap.accounts.length === 0
-        ? 'Chưa có tài khoản nào — nhấn [i] Nhập Chrome/Clipboard hoặc [+] Thêm thủ công'
-        : 'Không có tài khoản khớp bộ lọc — nhấn [f] đổi bộ lọc hoặc [Esc] xóa tìm kiếm';
+        ? tr(
+            'Chưa có tài khoản nào — nhấn [i] Nhập Chrome/Clipboard hoặc [+] Thêm thủ công',
+            'No accounts yet — press [i] Import Chrome/Clipboard or [+] Add account',
+          )
+        : tr(
+            'Không có tài khoản khớp bộ lọc — nhấn [f] đổi bộ lọc hoặc [Esc] xóa tìm kiếm',
+            'No accounts match current filter — press [f] change filter or [Esc] clear search',
+          );
     lines.push(boxLine(paint(ANSI.yellow, emptyMsg), innerW, ANSI.gray));
     for (let r = 1; r < availableTableRows; r += 1) {
       lines.push(boxLine('', innerW, ANSI.gray));
@@ -469,15 +480,15 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
       const modeText =
         acc.profile_mode === 'linked'
           ? paint(ANSI.cyan, `Link:${acc.chrome_profile_name ?? 'Default'}`)
-          : paint(ANSI.gray, 'Riêng');
+          : paint(ANSI.gray, tr('Riêng', 'Isolated'));
 
       const rowParts = [
         `${cursor}${star} `,
         padRightWidth(isSelected ? paint(ANSI.bold + ANSI.white, acc.alias) : acc.alias, aliasW),
         padRightWidth(acc.email, emailW),
-        padRightWidth(formatStateLabel(acc), stateW),
+        padRightWidth(formatStateLabel(acc, lang), stateW),
         padRightWidth(modeText, modeW),
-        padRightWidth(formatAgyCell(acc), agyW),
+        padRightWidth(formatAgyCell(acc, lang), agyW),
       ];
       if (tagsW > 0) {
         const tagStr = acc.tags.length > 0 ? acc.tags.map((t) => `#${t}`).join(' ') : '—';
@@ -497,16 +508,27 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
   lines.push(boxBottom(width, ANSI.gray));
 
   // ── Detail Box ───────────────────────────────────────────
-  lines.push(boxTop(selectedAcc ? `Chi tiết: ${selectedAcc.alias}` : 'Chi tiết tài khoản', width, ANSI.gray));
+  lines.push(
+    boxTop(
+      selectedAcc ? `${tr('Chi tiết', 'Details')}: ${selectedAcc.alias}` : tr('Chi tiết tài khoản', 'Account details'),
+      width,
+      ANSI.gray,
+    ),
+  );
   if (!selectedAcc) {
-    lines.push(boxLine(paint(ANSI.gray, 'Chọn một tài khoản để xem thông tin chi tiết và thao tác nhanh.'), innerW));
+    lines.push(
+      boxLine(
+        paint(ANSI.gray, tr('Chọn một tài khoản để xem thông tin chi tiết và thao tác nhanh.', 'Select an account to view details and quick actions.')),
+        innerW,
+      ),
+    );
     lines.push(boxLine('', innerW));
     lines.push(boxLine('', innerW));
     lines.push(boxLine('', innerW));
   } else {
     const namePart = selectedAcc.display_name ? `${selectedAcc.display_name} • ` : '';
     const renewalPart = selectedAcc.renewal_date
-      ? `  │  Gia hạn: ${selectedAcc.renewal_date}${selectedAcc.renewal_days_left !== null ? ` (còn ${selectedAcc.renewal_days_left}n)` : ''}`
+      ? `  │  ${tr('Gia hạn', 'Renewal')}: ${selectedAcc.renewal_date}${selectedAcc.renewal_days_left !== null ? ` (${tr('còn', 'in')} ${selectedAcc.renewal_days_left}${tr('n', 'd')})` : ''}`
       : '';
     lines.push(
       boxLine(
@@ -514,31 +536,51 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
         innerW,
       ),
     );
-    const chromeStr = selectedAcc.chrome_running ? paint(ANSI.magenta, 'Chrome đang mở') : paint(ANSI.gray, 'Chrome đóng');
+    const chromeStr = selectedAcc.chrome_running
+      ? paint(ANSI.magenta, tr('Chrome đang mở', 'Chrome open'))
+      : paint(ANSI.gray, tr('Chrome đóng', 'Chrome closed'));
     const modeDetail =
       selectedAcc.profile_mode === 'linked'
         ? `Link (${selectedAcc.chrome_profile_name ?? 'Default'})`
-        : `Profile riêng (${selectedAcc.chrome_profile_dir})`;
+        : `${tr('Profile riêng', 'Isolated')} (${selectedAcc.chrome_profile_dir})`;
     lines.push(
       boxLine(
-        `Chế độ: ${modeDetail}  │  ${chromeStr}  │  Đã dùng: ${selectedAcc.use_count} lần  │  Kiểm tra: ${formatTimeShort(selectedAcc.last_checked_at)}`,
+        `${tr('Chế độ', 'Mode')}: ${modeDetail}  │  ${chromeStr}  │  ${tr('Đã dùng', 'Uses')}: ${selectedAcc.use_count}  │  ${tr('Kiểm tra', 'Checked')}: ${formatTimeShort(selectedAcc.last_checked_at)}`,
         innerW,
       ),
     );
 
     const agyDetail = selectedAcc.agy_session?.captured
       ? selectedAcc.agy_session.is_live_owner
-        ? paint(ANSI.brightGreen, `★ Đang nạp trong Keychain (lưu lúc ${formatTimeShort(selectedAcc.agy_session.captured_at)})`)
-        : paint(ANSI.cyan, `● Đã lưu snapshot (${formatTimeShort(selectedAcc.agy_session.captured_at)}) — nhấn [a] để nạp hoặc [g] để chạy agy`)
-      : paint(ANSI.yellow, 'Chưa lưu phiên agy — đăng nhập agy rồi nhấn [c] để lưu');
-    lines.push(boxLine(`Phiên agy: ${agyDetail}`, innerW));
+        ? paint(
+            ANSI.brightGreen,
+            tr(
+              `★ Đang nạp trong Keychain (lưu lúc ${formatTimeShort(selectedAcc.agy_session.captured_at)})`,
+              `★ Active in Keychain (captured ${formatTimeShort(selectedAcc.agy_session.captured_at)})`,
+            ),
+          )
+        : paint(
+            ANSI.cyan,
+            tr(
+              `● Đã lưu snapshot (${formatTimeShort(selectedAcc.agy_session.captured_at)}) — nhấn [a] để nạp hoặc [g] để chạy agy`,
+              `● Snapshot saved (${formatTimeShort(selectedAcc.agy_session.captured_at)}) — press [a] activate or [g] run agy`,
+            ),
+          )
+      : paint(
+          ANSI.yellow,
+          tr(
+            'Chưa lưu phiên agy — đăng nhập agy rồi nhấn [c] để lưu',
+            'No agy snapshot — sign into agy then press [c] to capture',
+          ),
+        );
+    lines.push(boxLine(`${tr('Phiên agy', 'agy session')}: ${agyDetail}`, innerW));
 
     const extraParts: string[] = [];
     if (selectedAcc.cooldown_remaining_ms > 0) {
       extraParts.push(
         paint(
           ANSI.yellow,
-          `Cooldown còn ${formatShortDuration(selectedAcc.cooldown_remaining_ms)}${selectedAcc.cooldown_reason ? ` (${selectedAcc.cooldown_reason})` : ''}`,
+          `${tr('Cooldown còn', 'Cooldown left')} ${formatShortDuration(selectedAcc.cooldown_remaining_ms)}${selectedAcc.cooldown_reason ? ` (${selectedAcc.cooldown_reason})` : ''}`,
         ),
       );
     }
@@ -546,16 +588,18 @@ export function renderTuiFrame(state: TuiState, cols: number, rows: number): str
       const bStr = selectedAcc.bucket_cooldowns
         .map((b) => `[${b.bucket}] ${formatShortDuration(b.remaining_ms)}`)
         .join(', ');
-      extraParts.push(paint(ANSI.yellow, `CD nhóm: ${bStr}`));
+      extraParts.push(paint(ANSI.yellow, `${tr('CD nhóm', 'Buckets')}: ${bStr}`));
     }
     if (selectedAcc.proxy_url) extraParts.push(`Proxy: ${selectedAcc.proxy_url}`);
-    if (selectedAcc.notes) extraParts.push(`Ghi chú: ${selectedAcc.notes}`);
+    if (selectedAcc.notes) extraParts.push(`${tr('Ghi chú', 'Notes')}: ${selectedAcc.notes}`);
     if (selectedAcc.session_detail && (selectedAcc.session_status === 'needs_login' || selectedAcc.session_status === 'error')) {
       extraParts.push(paint(ANSI.red, selectedAcc.session_detail));
     }
     lines.push(
       boxLine(
-        extraParts.length > 0 ? extraParts.join('  │  ') : paint(ANSI.gray, 'Lệnh nhanh: gpool run ' + selectedAcc.alias + ' -- agy'),
+        extraParts.length > 0
+          ? extraParts.join('  │  ')
+          : paint(ANSI.gray, `${tr('Lệnh nhanh', 'Quick cmd')}: gpool agy --alias ${selectedAcc.alias}`),
         innerW,
       ),
     );
@@ -614,60 +658,63 @@ function renderNoticeAndFooter(state: TuiState, width: number, inModal: boolean)
     return out;
   }
 
+  const lang: Locale = state.locale ?? state.snapshot?.settings?.language ?? 'vi';
+  const tr = (vi: string, en: string) => pick(lang, vi, en);
   const k = (key: string, label: string) => `${paint(ANSI.cyan + ANSI.bold, `[${key}]`)}${paint(ANSI.gray, label)}`;
   const compact = width < 105;
   const row1 = compact
     ? [
-        k('↑↓', 'Chọn'),
+        k('↑↓', tr('Chọn', 'Nav')),
         k('s', 'Switch'),
         k('g', 'agy'),
-        k('a', 'Nạp'),
-        k('c', 'Lưu'),
-        k('n', 'Kế'),
+        k('a', tr('Nạp', 'Act')),
+        k('c', tr('Lưu', 'Cap')),
+        k('N', tr('agyKế', 'Next')),
         k('o', 'Chrome'),
         k('x', 'CD'),
         k('p', 'Check'),
       ].join(' ')
     : [
-        k('↑↓/jk', 'Chọn'),
+        k('↑↓/jk', tr('Chọn', 'Nav')),
         k('s', 'Switch'),
-        k('g', 'Chạy agy'),
-        k('a', 'Nạp agy'),
-        k('c', 'Lưu agy'),
-        k('n', 'Đổi kế'),
+        k('g', tr('Chạy agy', 'Run agy')),
+        k('a', tr('Nạp agy', 'Activate')),
+        k('c', tr('Lưu agy', 'Capture')),
+        k('N', tr('agy Kế', 'agy Next')),
         k('o', 'Chrome'),
-        k('l', 'Login'),
         k('x', 'Cooldown'),
         k('p', 'Check'),
+        k('H', tr('Sức khỏe', 'Health')),
+        k('U', tr('Thống kê', 'Stats')),
       ].join(' ');
   const row2 = compact
     ? [
-        k('+', 'Thêm'),
-        k('i', 'Nhập'),
-        k('t', 'Tách'),
-        k('u', 'OAuth'),
-        k('e', 'Sửa'),
-        k('d', 'Xóa'),
-        k('/', 'Tìm'),
-        k('f', 'Lọc'),
+        k('+', tr('Thêm', 'Add')),
+        k('i', tr('Nhập', 'Imp')),
+        k('t', tr('Tách', 'Iso')),
+        k('e', tr('Sửa', 'Edit')),
+        k('d', tr('Xóa', 'Del')),
+        k('/', tr('Tìm', 'Find')),
+        k('f', tr('Lọc', 'Flt')),
+        k('L', lang === 'vi' ? 'EN' : 'VI'),
         k('D', 'Menu'),
         k('?', 'Help'),
-        k('q', 'Thoát'),
+        k('q', tr('Thoát', 'Quit')),
       ].join(' ')
     : [
-        k('+', 'Thêm'),
-        k('i', 'Nhập Chrome'),
-        k('t', 'Tách riêng'),
+        k('+', tr('Thêm', 'Add')),
+        k('i', tr('Nhập Chrome', 'Import')),
+        k('t', tr('Tách riêng', 'Isolate')),
         k('u', 'OAuth'),
-        k('e', 'Sửa'),
-        k('d', 'Xóa'),
-        k('/', 'Tìm'),
-        k('f', 'Lọc'),
-        k('A', 'agy Status'),
+        k('e', tr('Sửa', 'Edit')),
+        k('d', tr('Xóa', 'Del')),
+        k('/', tr('Tìm', 'Search')),
+        k('f', tr('Lọc', 'Filter')),
+        k('L', lang === 'vi' ? 'Lang:EN' : 'Lang:VI'),
         k('v', 'Log'),
-        k('D', 'Hệ thống'),
+        k('D', tr('Hệ thống', 'System')),
         k('?', 'Help'),
-        k('q', 'Thoát'),
+        k('q', tr('Thoát', 'Quit')),
       ].join(' ');
   out.push(truncateWidth(' ' + row1, width));
   out.push(truncateWidth(' ' + row2, width));
@@ -1229,6 +1276,7 @@ async function runBulkImportLocalOrDaemon(
 export interface RunTuiOptions {
   paths: PoolPaths;
   port: number;
+  locale?: Locale;
   runCliSubcommand: (argv: string[]) => Promise<number>;
 }
 
@@ -1237,20 +1285,34 @@ export interface RunTuiOptions {
  */
 export async function runTui(options: RunTuiOptions): Promise<number> {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
-    console.error('Lỗi: Chế độ TUI yêu cầu terminal tương tác (TTY). Dùng "gpool help" để xem các lệnh CLI.');
+    console.error(
+      pick(
+        options.locale ?? 'vi',
+        'Lỗi: Chế độ TUI yêu cầu terminal tương tác (TTY). Dùng "gpool help" để xem các lệnh CLI.',
+        'Error: TUI mode requires an interactive terminal (TTY). Run "gpool help" for CLI commands.',
+      ),
+    );
     return 1;
   }
 
   const { paths, port } = options;
   const state: TuiState = {
     snapshot: null,
+    locale: options.locale,
     selectedIndex: 0,
     scrollOffset: 0,
     filterStatus: 'all',
     searchQuery: '',
     searchActive: false,
     busyMessage: null,
-    notice: { text: 'Nhấn [?] để xem bảng phím tắt & lệnh CLI tương ứng.', kind: 'info' },
+    notice: {
+      text: pick(
+        options.locale ?? 'vi',
+        'Nhấn [?] xem phím tắt • [L] đổi ngôn ngữ VI/EN • [H] sức khỏe agy • [U] thống kê.',
+        'Press [?] for shortcuts • [L] toggle EN/VI • [H] agy health • [U] analytics.',
+      ),
+      kind: 'info',
+    },
     modal: null,
   };
 
@@ -2449,6 +2511,35 @@ export async function runTui(options: RunTuiOptions): Promise<number> {
             })();
         state.modal = { type: 'analytics', report: rep };
       });
+      return;
+    }
+
+    if (str === 'L') {
+      const curLang: Locale = state.locale ?? state.snapshot?.settings?.language ?? 'vi';
+      const nextLang: Locale = curLang === 'vi' ? 'en' : 'vi';
+      void runAction(
+        nextLang === 'en' ? 'Switching language to English...' : 'Đang chuyển sang Tiếng Việt...',
+        async () => {
+          if (await isDaemonAlive(port)) {
+            await callDaemon(port, '/api/settings', {
+              method: 'PATCH',
+              body: JSON.stringify({ language: nextLang }),
+            });
+          } else {
+            const db = new PoolDB(paths);
+            try {
+              db.updateSettings({ language: nextLang });
+            } finally {
+              db.close();
+            }
+          }
+          state.locale = nextLang;
+          setNotice(
+            nextLang === 'en' ? 'Language switched to English (EN).' : 'Đã chuyển sang Tiếng Việt (VI).',
+            'success',
+          );
+        },
+      );
       return;
     }
 

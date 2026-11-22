@@ -36,10 +36,12 @@ import {
   resolvePort,
   validateAlias,
   validateEmail,
+  validateLocale,
   validateRotationPolicy,
   type PoolPaths,
 } from './config.ts';
 import { PoolDB } from './db.ts';
+import { getCommandHelpText, getMainHelpText, pick, resolveLocale } from './i18n.ts';
 import { KeepAliveScheduler } from './keepalive.ts';
 import { getLaunchAgentStatus, installLaunchAgent, uninstallLaunchAgent } from './launchagent.ts';
 import { runMcpServer } from './mcp.ts';
@@ -55,6 +57,7 @@ import type {
   BulkImportResult,
   EffectiveState,
   EncryptedBackupBundle,
+  Locale,
   PlanTier,
   PoolAnalyticsReport,
   PoolExportPayload,
@@ -68,33 +71,54 @@ interface ParsedArgs {
   passthrough: string[];
 }
 
+async function loadCliLocale(paths: PoolPaths, port: number, flagLang?: string): Promise<Locale> {
+  if (flagLang) return validateLocale(flagLang);
+  if (process.env.GPOOL_LANG?.trim()) return resolveLocale(process.env.GPOOL_LANG);
+  try {
+    if (await isDaemonAlive(port)) {
+      const res = await callDaemon<{ settings?: { language?: Locale } }>(port, '/api/settings');
+      return resolveLocale(undefined, res.settings?.language);
+    }
+    if (fs.existsSync(paths.dbPath)) {
+      const db = new PoolDB(paths);
+      try {
+        return resolveLocale(undefined, db.getSettings().language);
+      } finally {
+        db.close();
+      }
+    }
+  } catch {
+    // Fall back to default locale.
+  }
+  return resolveLocale();
+}
+
 export async function runCli(argv: string[]): Promise<number> {
   const parsed = parseCliArgs(argv);
   const asJson = Boolean(parsed.flags.get('json'));
   const wantHelp = Boolean(parsed.flags.get('help'));
-
-  if (argv.length === 0) {
-    if (process.stdin.isTTY && process.stdout.isTTY) {
-      const paths = resolvePaths();
-      const port = resolvePort();
-      return await runTui({ paths, port, runCliSubcommand: runCli });
-    }
-    printHelp();
-    return 0;
-  }
-
-  const cmd = parsed.positionals[0] ?? (wantHelp ? 'help' : 'help');
-  const rest = parsed.positionals.slice(1);
-
-  if (wantHelp && cmd !== 'help' && cmd !== '--help' && cmd !== '-h') {
-    printCommandHelp(cmd);
-    return 0;
-  }
-
   const paths = resolvePaths();
   const port = resolvePort(
     typeof parsed.flags.get('port') === 'string' ? Number(parsed.flags.get('port')) : undefined,
   );
+  const flagLang = getStrFlag(parsed.flags, 'lang');
+  const locale = await loadCliLocale(paths, port, flagLang);
+
+  if (argv.length === 0) {
+    if (process.stdin.isTTY && process.stdout.isTTY) {
+      return await runTui({ paths, port, locale, runCliSubcommand: runCli });
+    }
+    printHelp(locale);
+    return 0;
+  }
+
+  const cmd = parsed.positionals[0] ?? 'help';
+  const rest = parsed.positionals.slice(1);
+
+  if (wantHelp && cmd !== 'help' && cmd !== '--help' && cmd !== '-h') {
+    printCommandHelp(locale, cmd);
+    return 0;
+  }
 
   try {
     switch (cmd) {
@@ -102,16 +126,20 @@ export async function runCli(argv: string[]): Promise<number> {
       case '--help':
       case '-h':
         if (rest[0]) {
-          printCommandHelp(rest[0]);
+          printCommandHelp(locale, rest[0]);
         } else {
-          printHelp();
+          printHelp(locale);
         }
         return 0;
+
+      case 'lang':
+      case 'language':
+        return await handleLang(rest, paths, port, locale, asJson);
 
       case 'tui':
       case 'ui':
       case 'interactive':
-        return await runTui({ paths, port, runCliSubcommand: runCli });
+        return await runTui({ paths, port, locale, runCliSubcommand: runCli });
 
       case 'add':
         return await handleAdd(rest, parsed.flags, paths, port, asJson);
@@ -225,17 +253,73 @@ export async function runCli(argv: string[]): Promise<number> {
         return await handleImport(rest, parsed.flags, paths, port, asJson);
 
       default:
-        throw new Error(`Lệnh không hợp lệ: "${cmd}". Chạy "gpool help" để xem hướng dẫn.`);
+        throw new Error(
+          pick(
+            locale,
+            `Lệnh không hợp lệ: "${cmd}". Chạy "gpool help" để xem hướng dẫn.`,
+            `Unknown command: "${cmd}". Run "gpool help" for usage.`,
+          ),
+        );
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     if (asJson) {
       console.log(JSON.stringify({ ok: false, error: msg }, null, 2));
     } else {
-      console.error(`Lỗi: ${msg}`);
+      console.error(`${pick(locale, 'Lỗi', 'Error')}: ${msg}`);
     }
     return 1;
   }
+}
+
+async function handleLang(
+  args: string[],
+  paths: PoolPaths,
+  port: number,
+  currentLocale: Locale,
+  asJson: boolean,
+): Promise<number> {
+  const [nextRaw] = args;
+  if (!nextRaw) {
+    if (asJson) {
+      console.log(JSON.stringify({ ok: true, language: currentLocale }, null, 2));
+    } else {
+      console.log(
+        pick(
+          currentLocale,
+          `Ngôn ngữ hiện tại: ${currentLocale} (Tiếng Việt). Đổi sang tiếng Anh: gpool lang en`,
+          `Current language: ${currentLocale} (English). Switch to Vietnamese: gpool lang vi`,
+        ),
+      );
+    }
+    return 0;
+  }
+
+  const next = validateLocale(nextRaw);
+  if (await isDaemonAlive(port)) {
+    await callDaemon(port, '/api/settings', {
+      method: 'PATCH',
+      body: JSON.stringify({ language: next }),
+    });
+  } else {
+    const db = new PoolDB(paths);
+    try {
+      db.updateSettings({ language: next });
+    } finally {
+      db.close();
+    }
+  }
+
+  if (asJson) {
+    console.log(JSON.stringify({ ok: true, language: next }, null, 2));
+  } else {
+    console.log(
+      next === 'en'
+        ? 'Language switched to English (en). All CLI, TUI, Web Dashboard, and Menu Bar interfaces will use English.'
+        : 'Đã chuyển ngôn ngữ sang Tiếng Việt (vi). CLI, TUI, Web Dashboard và Menu Bar sẽ dùng Tiếng Việt.',
+    );
+  }
+  return 0;
 }
 
 async function handleAdd(
@@ -2282,58 +2366,29 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function printHelp(): void {
-  console.log(`Google One Pool (gpool) — Quản lý nhiều tài khoản Google AI Pro cho agy CLI & Chrome
+function printHelp(locale: Locale = 'vi'): void {
+  console.log(getMainHelpText(locale));
+}
 
-Giao diện TUI tương tác (dễ dùng nhất — không cần nhớ lệnh):
-  gpool                                 Mở giao diện TUI toàn màn hình (khi chạy trong terminal tương tác)
-  gpool tui                             Mở giao diện TUI tương tác (alias: gpool ui)
-  gpool help [lệnh]                     Xem hướng dẫn chung hoặc chi tiết từng lệnh (vd: gpool help agy-activate)
-
-Quản lý & nhập tài khoản:
-  gpool add <alias> <email> [--tags a,b] [--renewal YYYY-MM-DD] [--proxy <url>] [--notes "..."]
-  gpool import-chrome [--dry-run] [--isolated] [--tags pro] [--json]
-  gpool import-clipboard [--profile "Default"] [--browser chrome|brave] [--dry-run] [--isolated]
-  gpool import-emails <file.txt | --emails "a@g.com,b@g.com"> [--profile "Default"] [--isolated] [--tags pro]
-  gpool list [--status ready|cooldown|needs_login] [--tag <tag>] [-q <text>] [--json]
-  gpool show <alias> [--json]
-  gpool edit <alias> [--alias ...] [--email ...] [--tags ...] [--renewal ...] [--proxy ...] [--notes ...]
-  gpool rm <alias> [--purge]
-
-Điều khiển tài khoản & vòng xoay:
-  gpool login <alias>                   Mở Chrome profile để đăng nhập Google (điền sẵn email)
-  gpool login-wizard                    Mở nối tiếp từng Chrome profile riêng đang chờ đăng nhập (1/N)
-  gpool open <alias> [url]              Mở hoặc focus cửa sổ Chrome của tài khoản
-  gpool switch <alias> [--no-open]      Chọn tài khoản làm active và mở Chrome profile
-  gpool next [--cooldown <giờ>]         Đặt cooldown acc hiện tại, tự xoay sang acc sẵn sàng tiếp theo
-  gpool auth <alias> [oauth-url]        Mở link OAuth của agy vào đúng profile Chrome (tự lấy từ clipboard nếu bỏ trống)
-  gpool isolate <alias|--all> [--no-open]  Tách 1 hoặc tất cả acc đang Link sang Chrome profile riêng độc lập
-  gpool cooldown <alias> <giờ|clear>    Đặt hoặc gỡ cooldown thủ công
-  gpool check [alias]                   Kiểm tra & làm mới cookie (1 acc hoặc toàn bộ pool)
-
-Phiên agy CLI (Auto-Failover, Keychain & MCP):
-  gpool agy [flags] -- <args...>        Chạy agy có tự phát hiện hết quota + tự xoay acc + khóa agy.lock
-  gpool agy-next [--cooldown <h>] [--bucket <bkt>]  Xoay sang acc agy kế tiếp & tự nạp Keychain (1 lệnh)
-  gpool agy-capture <alias>             Lưu phiên agy hiện tại trong Keychain vào tài khoản này
-  gpool agy-activate <alias> [--force]  Nạp phiên đã lưu vào Keychain — đổi acc agy không cần login lại
-  gpool agy-status                      Xem phiên keychain hiện tại thuộc acc nào + các snapshot đã lưu
-  gpool agy-health [--json]             Kiểm tra sức khỏe toàn bộ snapshot agy + cảnh báo ngày gia hạn
-  gpool agy-encrypt [--json]            Mã hóa toàn bộ snapshot agy trên đĩa bằng AES-256-GCM (Keychain master key)
-  gpool agy-onboard [--alias <a>|--all] Wizard 1/N tự bắt link OAuth mở đúng Chrome & tự động capture phiên agy
-  gpool agy-lock <status|unlock>        Xem hoặc mở khóa agy.lock (chống xung đột Keychain giữa nhiều agent)
-  gpool stats [--days 7] [--json]       Xem biểu đồ hiệu suất pool, lượt xoay vòng & tỷ lệ đụng quota
-  gpool run <alias> -- agy              Tự nạp phiên đã lưu rồi chạy agy (với CLI khác: ADC / GEMINI_CLI_HOME)
-  gpool mcp                             Chạy MCP Server (stdio) cho AI Agents (Devin/Claude/Codex/Cursor)
-
-Daemon, Web Dashboard & macOS:
-  gpool daemon <start|stop|status|run>  Quản lý dịch vụ nền & HTTP localhost:47891
-  gpool dashboard                       Khởi động daemon nếu cần và mở Web Dashboard
-  gpool menubar <build|start|stop>      Build và mở app Menu Bar gốc trên macOS
-  gpool launchagent <install|uninstall|status>  Tự chạy daemon khi mở máy macOS
-  gpool export [file] [--encrypted] [--with-sessions]  Xuất metadata hoặc backup mã hóa (kèm phiên agy)
-  gpool import <file> [--passphrase "..."]             Khôi phục metadata hoặc backup mã hóa từ file
-
-Tài liệu chi tiết: docs/CLI-GUIDE.md (hoặc chạy "gpool help <tên-lệnh>").`);
+function printCommandHelp(locale: Locale, rawCmd: string): void {
+  const doc = getCommandHelpText(locale, rawCmd);
+  if (doc) {
+    console.log(doc);
+    return;
+  }
+  const fallback = COMMAND_HELP[rawCmd];
+  if (fallback && locale === 'vi') {
+    console.log(fallback);
+    return;
+  }
+  console.log(
+    pick(
+      locale,
+      `Không có hướng dẫn riêng cho "${rawCmd}".\n`,
+      `No dedicated help found for "${rawCmd}".\n`,
+    ),
+  );
+  printHelp(locale);
 }
 
 const COMMAND_HELP: Record<string, string> = {
@@ -2592,23 +2647,3 @@ Xuất toàn bộ metadata tài khoản & cài đặt ra JSON (KHÔNG bao gồm 
   import: `gpool import <file.json> [--json]
 Khôi phục/cập nhật danh sách tài khoản từ file JSON đã xuất bằng "gpool export".`,
 };
-
-function printCommandHelp(rawCmd: string): void {
-  const aliases: Record<string, string> = {
-    ui: 'tui',
-    interactive: 'tui',
-    ls: 'list',
-    info: 'show',
-    delete: 'rm',
-    use: 'switch',
-    rotate: 'next',
-  };
-  const key = aliases[rawCmd] ?? rawCmd;
-  const doc = COMMAND_HELP[key];
-  if (doc) {
-    console.log(doc);
-  } else {
-    console.log(`Không có hướng dẫn riêng cho "${rawCmd}".\n`);
-    printHelp();
-  }
-}

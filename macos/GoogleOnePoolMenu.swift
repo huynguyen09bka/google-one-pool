@@ -32,6 +32,7 @@ struct SummaryDTO: Codable, Sendable {
 
 struct SettingsDTO: Codable, Sendable {
     let default_cooldown_hours: Double?
+    let language: String?
 }
 
 struct AgyStatusDTO: Codable, Sendable {
@@ -163,14 +164,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return String(format: "%.2gh", val)
     }
 
+    private var isEnglish: Bool {
+        if let lang = settings?.language?.lowercased() {
+            return lang.hasPrefix("en")
+        }
+        if let envLang = ProcessInfo.processInfo.environment["GPOOL_LANG"]?.lowercased() {
+            return envLang.hasPrefix("en")
+        }
+        return false
+    }
+
+    private func tr(_ vi: String, _ en: String) -> String {
+        return isEnglish ? en : vi
+    }
+
     private func rebuildMenu() {
         menu.removeAllItems()
 
         let headerTitle: String
         if daemonOnline, let s = summary {
-            var parts = ["Google One Pool", "\(s.ready)/\(s.total) sẵn sàng"]
+            var parts = ["Google One Pool", "\(s.ready)/\(s.total) \(tr("sẵn sàng", "ready"))"]
             if s.cooldown > 0 { parts.append("\(s.cooldown) cooldown") }
-            if s.needs_login > 0 { parts.append("\(s.needs_login) cần login") }
+            if s.needs_login > 0 { parts.append("\(s.needs_login) \(tr("cần login", "needs login"))") }
             if let owner = agyStatus?.live_owner_alias {
                 parts.append("agy: \(owner)")
             }
@@ -184,8 +199,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         let cdText = formatCooldownHours(settings?.default_cooldown_hours)
+        let nextAgyItem = NSMenuItem(
+            title: tr("Xoay nhanh agy kế tiếp (+\(cdText))", "Rotate next agy (+\(cdText))"),
+            action: #selector(handleRotateNextAgy),
+            keyEquivalent: "N"
+        )
+        nextAgyItem.target = self
+        nextAgyItem.isEnabled = daemonOnline && !accounts.isEmpty
+        menu.addItem(nextAgyItem)
+
         let nextItem = NSMenuItem(
-            title: "Chuyển acc kế tiếp (+\(cdText) cooldown)",
+            title: tr("Chuyển acc kế tiếp (+\(cdText) cooldown)", "Switch next account (+\(cdText) cooldown)"),
             action: #selector(handleRotateNext),
             keyEquivalent: "n"
         )
@@ -198,7 +222,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             if let agy = active.agy_session, agy.captured {
                 if agy.is_live_owner {
                     let agyDone = NSMenuItem(
-                        title: "agy Keychain đang dùng \"\(active.alias)\"",
+                        title: tr("agy Keychain đang dùng \"\(active.alias)\"", "agy Keychain active: \"\(active.alias)\""),
                         action: nil,
                         keyEquivalent: ""
                     )
@@ -206,7 +230,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     menu.addItem(agyDone)
                 } else {
                     let agyAct = NSMenuItem(
-                        title: "Nạp phiên agy của \"\(active.alias)\" vào Keychain",
+                        title: tr("Nạp phiên agy của \"\(active.alias)\" vào Keychain", "Activate agy session \"\(active.alias)\""),
                         action: #selector(handleAgyActivateActive),
                         keyEquivalent: "a"
                     )
@@ -216,7 +240,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 }
             } else {
                 let agyCap = NSMenuItem(
-                    title: "Lưu phiên agy hiện tại vào \"\(active.alias)\"",
+                    title: tr("Lưu phiên agy hiện tại vào \"\(active.alias)\"", "Capture current agy session to \"\(active.alias)\""),
                     action: #selector(handleAgyCaptureActive),
                     keyEquivalent: "c"
                 )
@@ -227,8 +251,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
 
         let oauthTitle = activeAlias != nil
-            ? "Mở link OAuth từ Clipboard vào \"\(activeAlias!)\""
-            : "Mở link OAuth từ Clipboard"
+            ? tr("Mở link OAuth từ Clipboard vào \"\(activeAlias!)\"", "Open OAuth URL from Clipboard in \"\(activeAlias!)\"")
+            : tr("Mở link OAuth từ Clipboard", "Open OAuth URL from Clipboard")
         let oauthItem = NSMenuItem(
             title: oauthTitle,
             action: #selector(handleOpenOAuthFromClipboard),
@@ -242,7 +266,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         if accounts.isEmpty {
             let emptyItem = NSMenuItem(
-                title: daemonOnline ? "Chưa có tài khoản nào (mở Dashboard để thêm)" : "Hãy chạy: gpool daemon start",
+                title: daemonOnline
+                    ? tr("Chưa có tài khoản nào (mở Dashboard để thêm)", "No accounts yet (open Dashboard to add)")
+                    : tr("Hãy chạy: gpool daemon start", "Run: gpool daemon start"),
                 action: nil,
                 keyEquivalent: ""
             )
@@ -253,11 +279,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                 let emoji = iconForState(acc.effective_state)
                 var suffixParts: [String] = []
                 if acc.is_active {
-                    suffixParts.append("Đang chọn")
+                    suffixParts.append(tr("Đang chọn", "Active"))
                 } else if acc.cooldown_remaining_ms > 0 {
-                    suffixParts.append("còn \(formatDuration(acc.cooldown_remaining_ms))")
+                    suffixParts.append("\(tr("còn", "left")) \(formatDuration(acc.cooldown_remaining_ms))")
                 } else if acc.effective_state == "needs_login" {
-                    suffixParts.append("Cần đăng nhập")
+                    suffixParts.append(tr("Cần đăng nhập", "Needs login"))
                 }
                 if acc.agy_session?.is_live_owner == true {
                     suffixParts.append("agy live")
@@ -277,7 +303,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         let sweepItem = NSMenuItem(
-            title: "Quét giữ phiên ngay (Keep-Alive)",
+            title: tr("Quét giữ phiên ngay (Keep-Alive)", "Run Keep-Alive Sweep Now"),
             action: #selector(handleSweep),
             keyEquivalent: "k"
         )
@@ -286,7 +312,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(sweepItem)
 
         let dashItem = NSMenuItem(
-            title: "Mở Web Dashboard",
+            title: tr("Mở Web Dashboard", "Open Web Dashboard"),
             action: #selector(handleOpenDashboard),
             keyEquivalent: "d"
         )
@@ -294,7 +320,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(dashItem)
 
         let refreshItem = NSMenuItem(
-            title: "Làm mới danh sách",
+            title: tr("Làm mới danh sách", "Refresh Accounts"),
             action: #selector(handleManualRefresh),
             keyEquivalent: "r"
         )
@@ -304,7 +330,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(.separator())
 
         let quitItem = NSMenuItem(
-            title: "Thoát Menu Bar",
+            title: tr("Thoát Menu Bar", "Quit Menu Bar"),
             action: #selector(handleQuit),
             keyEquivalent: "q"
         )
@@ -344,6 +370,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let encoded = alias.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed) ?? alias
         Task {
             await postAction(path: "api/accounts/\(encoded)/switch", body: ["openChrome": true])
+        }
+    }
+
+    @objc private func handleRotateNextAgy() {
+        Task {
+            await postAction(path: "api/pool/next", body: ["activateAgy": true, "requireAgy": true, "openChrome": false])
         }
     }
 

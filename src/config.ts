@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import type { DaemonSettings, PlanTier, RotationPolicy } from './types.ts';
+import type { DaemonSettings, Locale, PlanTier, RotationPolicy } from './types.ts';
 
 export const DEFAULT_PORT = 47891;
 export const DEFAULT_HOST = '127.0.0.1';
@@ -18,6 +18,8 @@ export const VALID_ROTATION_POLICIES: readonly RotationPolicy[] = [
   'round-robin',
   'tier-first',
 ];
+
+export const VALID_LOCALES: readonly Locale[] = ['vi', 'en'];
 
 export interface PoolPaths {
   homeDir: string;
@@ -98,6 +100,7 @@ export function getDefaultSettings(): DaemonSettings {
     default_open_url: 'https://gemini.google.com/app',
     rotation_policy: 'lru',
     renewal_alert_days: 7,
+    language: 'vi',
   };
 }
 
@@ -223,6 +226,14 @@ export function validateBucketName(bucket: string | null | undefined): string {
     );
   }
   return normalized;
+}
+
+export function validateLocale(lang: string | undefined): Locale {
+  if (!lang || !lang.trim()) return 'vi';
+  const normalized = lang.trim().toLowerCase();
+  if (normalized === 'en' || normalized.startsWith('en-') || normalized.startsWith('en_')) return 'en';
+  if (normalized === 'vi' || normalized.startsWith('vi-') || normalized.startsWith('vi_')) return 'vi';
+  throw new Error(`Ngôn ngữ không hợp lệ / Unsupported language ("${lang}"). Supported: en, vi.`);
 }
 
 export function resolvePort(portOverride?: number): number {
