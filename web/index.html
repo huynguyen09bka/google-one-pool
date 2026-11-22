@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="vi" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Google One Pool — Quản lý tài khoản Google AI Pro</title>
+    <link rel="icon" type="image/svg+xml" href="/favicon.ico" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <div class="brand-group">
+          <div class="brand-mark" aria-hidden="true">G1P</div>
+          <div class="brand-text">
+            <h1>Google One Pool</h1>
+            <p class="subtitle">Quản lý pool Google AI Pro cho <code>agy</code> CLI &amp; Chrome</p>
+          </div>
+        </div>
+
+        <div class="topbar-actions">
+          <div class="status-group">
+            <div class="status-pill" id="sse-pill" title="Trạng thái kết nối thời gian thực với daemon">
+              <span class="dot" id="sse-dot"></span>
+              <span id="sse-text">Đang kết nối...</span>
+            </div>
+            <div class="status-pill" id="keepalive-pill" title="Keep-alive nền tự làm mới phiên Chrome">
+              <span class="dot dot-muted" id="keepalive-dot"></span>
+              <span id="keepalive-text">Keep-Alive</span>
+            </div>
+          </div>
+          <div class="action-group">
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-sweep">Quét phiên</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-import-chrome">Nhập Chrome</button>
+            <button type="button" class="btn btn-primary btn-sm" id="btn-add-account">+ Thêm</button>
+            <button type="button" class="btn btn-secondary btn-sm" id="btn-settings">Cài đặt</button>
+            <button
+              type="button"
+              class="btn btn-icon btn-sm"
+              id="btn-theme"
+              title="Đổi giao diện Sáng / Tối"
+              aria-label="Đổi giao diện Sáng / Tối"
+            >
+              ◐
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main class="main-content">
+        <section class="hero-card" id="active-panel" aria-label="Tài khoản đang chọn">
+          <div class="hero-main">
+            <div class="hero-left">
+              <div class="hero-eyebrow-row">
+                <span class="hero-eyebrow">TÀI KHOẢN ĐANG CHỌN</span>
+                <span class="badge badge-neutral" id="hero-agy-keychain" hidden></span>
+              </div>
+              <div class="hero-title-row">
+                <h2 id="active-alias">Chưa chọn tài khoản</h2>
+                <span class="badge badge-neutral" id="active-status-badge">—</span>
+                <span class="badge badge-accent" id="active-plan-badge" hidden>Google AI Pro</span>
+                <span class="badge badge-neutral" id="active-mode-badge" hidden></span>
+                <span class="badge badge-ready" id="active-agy-badge" hidden></span>
+              </div>
+              <p class="hero-email" id="active-email">Hãy nhập tài khoản từ Chrome hoặc thêm thủ công ở danh sách bên dưới.</p>
+              <p class="hero-meta" id="active-meta"></p>
+            </div>
+
+            <div class="hero-buttons">
+              <button type="button" class="btn btn-warning" id="btn-rotate-next" disabled>
+                Hết quota (+5h) → Đổi acc kế tiếp
+              </button>
+              <button type="button" class="btn btn-secondary" id="btn-active-agy" disabled>
+                Nạp phiên agy
+              </button>
+              <button type="button" class="btn btn-secondary" id="btn-active-open" disabled>
+                Mở Chrome Profile
+              </button>
+            </div>
+          </div>
+
+          <div class="oauth-bar">
+            <div class="oauth-guide">
+              <strong>Luồng <code>agy</code> CLI:</strong>
+              Đổi acc đã lưu bằng <strong>Nạp phiên agy</strong> hoặc <code>gpool run &lt;alias&gt; -- agy</code> (đóng <code>agy</code> trước, <strong>không dùng <code>/logout</code></strong> vì sẽ thu hồi token).
+              Chỉ dán link OAuth bên dưới khi đăng nhập lần đầu, sau đó bấm <strong>Lưu phiên agy</strong>.
+            </div>
+            <form class="oauth-form" id="oauth-form">
+              <select id="oauth-account-select" aria-label="Chọn tài khoản mở OAuth"></select>
+              <input
+                type="url"
+                id="oauth-url-input"
+                placeholder="Dán link OAuth (https://accounts.google.com/o/oauth2/...) khi đăng nhập lần đầu"
+                autocomplete="off"
+              />
+              <button type="submit" class="btn btn-primary" id="btn-oauth-submit">Mở OAuth vào Profile</button>
+            </form>
+          </div>
+        </section>
+
+        <section class="wizard-card" id="login-wizard-panel" hidden aria-label="Wizard tách profile và đăng nhập nối tiếp">
+          <div class="wizard-head">
+            <div class="wizard-head-text">
+              <div class="wizard-eyebrow" id="wizard-eyebrow">THIẾT LẬP PROFILE ĐỘC LẬP</div>
+              <h3 id="wizard-title">Wizard đăng nhập nối tiếp</h3>
+              <p class="muted-small" id="wizard-subtitle"></p>
+            </div>
+            <div class="wizard-head-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-wizard-isolate-all" hidden></button>
+              <button type="button" class="btn btn-ghost btn-sm" id="btn-wizard-dismiss">Ẩn tạm</button>
+            </div>
+          </div>
+
+          <div class="wizard-body" id="wizard-body" hidden>
+            <div class="wizard-progress">
+              <div class="wizard-progress-fill" id="wizard-progress-fill"></div>
+            </div>
+            <div class="wizard-target">
+              <div class="wizard-target-info">
+                <strong id="wizard-target-alias"></strong>
+                <span class="muted-small" id="wizard-target-email"></span>
+              </div>
+              <code class="wizard-profile-path" id="wizard-target-path"></code>
+            </div>
+            <div class="wizard-actions">
+              <button type="button" class="btn btn-primary" id="btn-wizard-open">
+                1. Mở Chrome acc này (điền sẵn email)
+              </button>
+              <button type="button" class="btn btn-warning" id="btn-wizard-done-next">
+                2. Đã đăng nhập xong → Mở acc tiếp theo
+              </button>
+              <button type="button" class="btn btn-ghost" id="btn-wizard-skip">
+                Bỏ qua acc này
+              </button>
+            </div>
+          </div>
+        </section>
+
+        <section class="kpi-grid" aria-label="Thống kê nhanh">
+          <button type="button" class="kpi-card kpi-interactive" data-kpi-filter="all">
+            <span class="kpi-label">Tổng tài khoản</span>
+            <strong class="kpi-value" id="kpi-total">0</strong>
+          </button>
+          <button type="button" class="kpi-card kpi-good kpi-interactive" data-kpi-filter="ready">
+            <span class="kpi-label">Sẵn sàng</span>
+            <strong class="kpi-value" id="kpi-ready">0</strong>
+          </button>
+          <button type="button" class="kpi-card kpi-warn kpi-interactive" data-kpi-filter="cooldown">
+            <span class="kpi-label">Đang Cooldown</span>
+            <strong class="kpi-value" id="kpi-cooldown">0</strong>
+          </button>
+          <button type="button" class="kpi-card kpi-danger kpi-interactive" data-kpi-filter="needs_login">
+            <span class="kpi-label">Cần đăng nhập / Lỗi</span>
+            <strong class="kpi-value" id="kpi-needs-login">0</strong>
+          </button>
+        </section>
+
+        <section class="toolbar" aria-label="Tìm kiếm và lọc tài khoản">
+          <div class="search-wrap">
+            <input
+              type="search"
+              id="search-input"
+              placeholder="Tìm theo alias, email, tag, ghi chú... (⌘K)"
+              autocomplete="off"
+            />
+          </div>
+
+          <div class="filter-group" id="status-filters">
+            <button type="button" class="chip chip-active" data-status="all">Tất cả</button>
+            <button type="button" class="chip" data-status="ready">Sẵn sàng</button>
+            <button type="button" class="chip" data-status="cooldown">Cooldown</button>
+            <button type="button" class="chip" data-status="needs_login">Cần đăng nhập</button>
+            <button type="button" class="chip" data-status="unknown" id="chip-status-unknown" hidden>Chưa kiểm tra</button>
+          </div>
+
+          <div class="filter-group" id="tag-filters"></div>
+        </section>
+
+        <section class="account-grid" id="account-grid" aria-label="Danh sách tài khoản"></section>
+
+        <section class="events-card">
+          <div class="events-header">
+            <h3>Nhật ký hoạt động gần đây</h3>
+            <button type="button" class="btn btn-ghost btn-sm" id="btn-toggle-events">Thu gọn</button>
+          </div>
+          <ul class="events-list" id="events-list"></ul>
+        </section>
+      </main>
+    </div>
+
+    <!-- Modal Nhập từ Chrome / Multi-login -->
+    <div class="modal-backdrop" id="import-chrome-modal" hidden>
+      <div class="modal modal-lg" role="dialog" aria-modal="true" aria-labelledby="import-chrome-title">
+        <div class="modal-header">
+          <h3 id="import-chrome-title">Nhập tài khoản từ Chrome / Brave sẵn có</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="import-chrome-modal" aria-label="Đóng">✕</button>
+        </div>
+        <div class="modal-body">
+          <div class="tabs-bar">
+            <button type="button" class="tab-btn tab-active" id="tab-btn-discover" data-import-tab="discover">
+              Quét Chrome / Brave tự động
+            </button>
+            <button type="button" class="tab-btn" id="tab-btn-bulk" data-import-tab="bulk">
+              Dán nhiều email (1 Profile gộp /u/0, /u/1...)
+            </button>
+          </div>
+
+          <!-- Tab 1: Auto Discover -->
+          <div id="panel-discover">
+            <div class="inline-row">
+              <p class="muted-small">
+                Chỉ đọc tên profile và email từ metadata (<code>Local State</code> &amp; <code>Preferences</code>), không đọc mật khẩu hay giải mã cookie.
+              </p>
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-rescan-chrome">Quét lại</button>
+            </div>
+
+            <div class="notice-box" id="discover-notice" hidden>
+              <p id="discover-notice-text"></p>
+              <button type="button" class="btn btn-primary btn-sm" id="btn-jump-to-bulk">
+                Chuyển sang nhập nhanh bằng Copy/Paste (5 giây) →
+              </button>
+            </div>
+
+            <div class="discovered-list" id="discovered-list"></div>
+
+            <div class="form-grid" style="margin-top: 12px;">
+              <label class="full-span">
+                <span>Chế độ quản lý khi nhập</span>
+                <select id="discover-mode">
+                  <option value="linked">Liên kết trực tiếp Chrome gốc (Dùng ngay, không cần đăng nhập lại)</option>
+                  <option value="isolated">Tách profile riêng trong gpool (Keep-Alive ngầm độc lập, đăng nhập lại 1 lần)</option>
+                </select>
+              </label>
+              <label>
+                <span>Gói cước mặc định</span>
+                <select id="discover-plan">
+                  <option value="Google AI Pro">Google AI Pro</option>
+                  <option value="Google AI Ultra">Google AI Ultra</option>
+                  <option value="Free">Free</option>
+                  <option value="Enterprise">Enterprise</option>
+                </select>
+              </label>
+              <label>
+                <span>Tags mặc định</span>
+                <input type="text" id="discover-tags" value="pro" placeholder="pro, chrome" />
+              </label>
+            </div>
+
+            <p class="form-error" id="discover-error" hidden></p>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-close-modal="import-chrome-modal">Đóng</button>
+              <button type="button" class="btn btn-primary" id="btn-submit-discover">Nhập các tài khoản đã chọn</button>
+            </div>
+          </div>
+
+          <!-- Tab 2: Bulk Paste Multi-login -->
+          <form id="bulk-import-form" hidden>
+            <div class="quick-steps-box">
+              <div>
+                <strong>Nhập cực nhanh trong 5 giây (hỗ trợ paste cả trang web, tự lọc email):</strong>
+                <div class="muted-small">
+                  1) Bấm <b>Mở trang tài khoản Google</b> → 2) Nhấn <code>⌘A</code> rồi <code>⌘C</code> trên trang đó → 3) Quay lại đây bấm <b>Dán từ Clipboard &amp; Tự lọc Email</b>.
+                </div>
+              </div>
+              <div class="quick-steps-actions">
+                <button type="button" class="btn btn-secondary btn-sm" id="btn-open-signout-options">
+                  1. Mở trang tài khoản Google
+                </button>
+                <button type="button" class="btn btn-primary btn-sm" id="btn-paste-clipboard">
+                  2. Dán từ Clipboard &amp; Tự lọc Email
+                </button>
+              </div>
+            </div>
+
+            <div class="form-grid">
+              <label>
+                <span>Chrome Profile đang chứa các tài khoản</span>
+                <select id="bulk-profile-select"></select>
+              </label>
+              <label id="bulk-custom-profile-wrap" hidden>
+                <span>Tên thư mục profile Chrome (vd: Default, Profile 1)</span>
+                <input type="text" id="bulk-custom-profile" value="Default" />
+              </label>
+              <label>
+                <span>Chế độ quản lý</span>
+                <select id="bulk-mode">
+                  <option value="linked">Liên kết trực tiếp Chrome gốc (tự gắn ?authuser=email)</option>
+                  <option value="isolated">Tách profile riêng trong gpool (đăng nhập lại từng acc 1 lần)</option>
+                </select>
+              </label>
+              <label>
+                <span>Gói cước mặc định</span>
+                <select id="bulk-plan">
+                  <option value="Google AI Pro">Google AI Pro</option>
+                  <option value="Google AI Ultra">Google AI Ultra</option>
+                  <option value="Free">Free</option>
+                  <option value="Enterprise">Enterprise</option>
+                </select>
+              </label>
+              <label>
+                <span>Tags mặc định</span>
+                <input type="text" id="bulk-tags" value="pro" placeholder="pro, work" />
+              </label>
+              <label class="full-span">
+                <span>Dán danh sách email hoặc nội dung trang Google SignOutOptions vào đây</span>
+                <textarea
+                  id="bulk-emails-text"
+                  rows="5"
+                  placeholder="Có thể dán nguyên trang vừa copy bằng ⌘A ⌘C, hoặc nhập từng dòng:&#10;acc1@gmail.com&#10;work acc2@gmail.com&#10;acc3@gmail.com | gói gia hạn ngày 15"
+                ></textarea>
+              </label>
+            </div>
+
+            <div class="preview-strip" id="bulk-preview-strip" hidden>
+              <div class="preview-strip-title" id="bulk-preview-title"></div>
+              <div class="preview-chips" id="bulk-preview-chips"></div>
+            </div>
+
+            <p class="form-error" id="bulk-error" hidden></p>
+            <div class="modal-footer">
+              <button type="button" class="btn btn-secondary" data-close-modal="import-chrome-modal">Hủy</button>
+              <button type="submit" class="btn btn-primary" id="btn-submit-bulk">Nhập tất cả email</button>
+            </div>
+          </form>
+        </div>
+      </div>
+    </div>
+
+    <!-- Modal Thêm / Sửa tài khoản -->
+    <div class="modal-backdrop" id="account-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="account-modal-title">
+        <div class="modal-header">
+          <h3 id="account-modal-title">Thêm tài khoản mới</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="account-modal" aria-label="Đóng">✕</button>
+        </div>
+        <form id="account-form" class="modal-body">
+          <input type="hidden" id="acc-editing-alias" />
+          <div class="form-grid">
+            <label>
+              <span>Alias (ngắn gọn, a-z, 0-9, -, _) *</span>
+              <input type="text" id="acc-alias" required placeholder="vd: pro-chinh" />
+            </label>
+            <label>
+              <span>Email Google *</span>
+              <input type="email" id="acc-email" required placeholder="ten@gmail.com" />
+            </label>
+            <label>
+              <span>Tên hiển thị</span>
+              <input type="text" id="acc-display-name" placeholder="Tài khoản làm việc chính" />
+            </label>
+            <label>
+              <span>Gói cước</span>
+              <select id="acc-plan-tier">
+                <option value="Google AI Pro">Google AI Pro</option>
+                <option value="Google AI Ultra">Google AI Ultra</option>
+                <option value="Free">Free</option>
+                <option value="Enterprise">Enterprise</option>
+              </select>
+            </label>
+            <label>
+              <span>Ngày gia hạn (YYYY-MM-DD)</span>
+              <input type="date" id="acc-renewal-date" />
+            </label>
+            <label>
+              <span>Tags (cách nhau bằng dấu phẩy)</span>
+              <input type="text" id="acc-tags" placeholder="pro, work, coding" />
+            </label>
+            <label>
+              <span>Chế độ Profile</span>
+              <select id="acc-profile-mode">
+                <option value="isolated">Profile riêng độc lập (gpool)</option>
+                <option value="linked">Liên kết Chrome gốc (--profile-directory)</option>
+              </select>
+            </label>
+            <label id="acc-authuser-wrap" hidden>
+              <span>Google authuser / login_hint (cho chế độ Link)</span>
+              <input type="text" id="acc-google-authuser" placeholder="ten@gmail.com hoặc 0, 1, 2..." />
+            </label>
+            <div class="full-span form-grid" id="acc-linked-fields" hidden>
+              <label>
+                <span>Chrome User Data Dir</span>
+                <input type="text" id="acc-chrome-user-data-dir" placeholder="~/Library/Application Support/Google/Chrome" />
+              </label>
+              <label>
+                <span>Tên thư mục Profile (vd: Default, Profile 1)</span>
+                <input type="text" id="acc-chrome-profile-name" placeholder="Default" />
+              </label>
+            </div>
+            <label class="full-span">
+              <span>Proxy riêng (tuỳ chọn, để trống = mạng máy)</span>
+              <input type="text" id="acc-proxy-url" placeholder="http://127.0.0.1:8080 hoặc socks5://127.0.0.1:1080" />
+            </label>
+            <label class="full-span">
+              <span>Đường dẫn GCP ADC JSON (chỉ dùng nếu xài Enterprise/Cloud ADC cho agy)</span>
+              <input type="text" id="acc-adc-path" placeholder="/Users/.../adc.json (để trống với acc cá nhân)" />
+            </label>
+            <label class="full-span">
+              <span>Ghi chú</span>
+              <textarea id="acc-notes" rows="2" placeholder="Ví dụ: thẻ Visa thanh toán, ưu tiên dùng ban ngày..."></textarea>
+            </label>
+          </div>
+          <p class="form-error" id="account-form-error" hidden></p>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close-modal="account-modal">Hủy</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-account">Lưu tài khoản</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal Cài đặt & Sao lưu -->
+    <div class="modal-backdrop" id="settings-modal" hidden>
+      <div class="modal" role="dialog" aria-modal="true" aria-labelledby="settings-modal-title">
+        <div class="modal-header">
+          <h3 id="settings-modal-title">Cài đặt hệ thống &amp; Sao lưu</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="settings-modal" aria-label="Đóng">✕</button>
+        </div>
+        <form id="settings-form" class="modal-body">
+          <div class="form-grid">
+            <label class="checkbox-row full-span">
+              <input type="checkbox" id="set-keepalive-enabled" />
+              <span>Bật Keep-Alive nền tự kiểm tra &amp; làm mới cookie định kỳ</span>
+            </label>
+            <label>
+              <span>Chu kỳ Keep-Alive (phút)</span>
+              <input type="number" id="set-interval" min="10" max="1440" />
+            </label>
+            <label>
+              <span>Độ lệch ngẫu nhiên (Jitter %)</span>
+              <input type="number" id="set-jitter" min="0" max="50" />
+            </label>
+            <label>
+              <span>Giãn cách giữa các acc (giây)</span>
+              <input type="number" id="set-stagger" min="0" max="300" />
+            </label>
+            <label>
+              <span>Cooldown mặc định khi hết quota (giờ)</span>
+              <input type="number" id="set-cooldown-hours" min="0.25" max="720" step="0.25" />
+            </label>
+            <label class="checkbox-row full-span">
+              <input type="checkbox" id="set-notify" />
+              <span>Gửi thông báo macOS khi phát hiện tài khoản bị mất phiên</span>
+            </label>
+            <label class="full-span">
+              <span>Đường dẫn Google Chrome / Brave</span>
+              <input type="text" id="set-chrome-bin" />
+            </label>
+            <label class="full-span">
+              <span>URL mở mặc định khi chuyển tài khoản</span>
+              <input type="url" id="set-open-url" />
+            </label>
+          </div>
+
+          <div class="backup-box">
+            <div>
+              <strong>Sao lưu / Khôi phục danh sách (chỉ metadata, không xuất cookie)</strong>
+              <p class="muted-small">Xuất file JSON để sao lưu danh sách email, tag, ghi chú và ngày gia hạn.</p>
+            </div>
+            <div class="backup-actions">
+              <button type="button" class="btn btn-secondary btn-sm" id="btn-export-json">Xuất JSON</button>
+              <label class="btn btn-secondary btn-sm file-btn">
+                Nhập JSON
+                <input type="file" id="input-import-json" accept="application/json,.json" hidden />
+              </label>
+            </div>
+          </div>
+
+          <p class="form-error" id="settings-form-error" hidden></p>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close-modal="settings-modal">Đóng</button>
+            <button type="submit" class="btn btn-primary" id="btn-save-settings">Lưu cài đặt</button>
+          </div>
+        </form>
+      </div>
+    </div>
+
+    <!-- Modal Xác nhận xóa -->
+    <div class="modal-backdrop" id="delete-modal" hidden>
+      <div class="modal modal-sm" role="dialog" aria-modal="true" aria-labelledby="delete-modal-title">
+        <div class="modal-header">
+          <h3 id="delete-modal-title">Xóa tài khoản</h3>
+          <button type="button" class="btn btn-icon" data-close-modal="delete-modal" aria-label="Đóng">✕</button>
+        </div>
+        <div class="modal-body">
+          <p id="delete-message">Bạn chắc chắn muốn xóa tài khoản này khỏi pool?</p>
+          <label class="checkbox-row" id="delete-purge-wrap">
+            <input type="checkbox" id="delete-purge-profile" />
+            <span>Xóa luôn thư mục Chrome profile (chỉ áp dụng cho profile tách riêng, không bao giờ xóa Chrome gốc)</span>
+          </label>
+          <div class="modal-footer">
+            <button type="button" class="btn btn-secondary" data-close-modal="delete-modal">Hủy</button>
+            <button type="button" class="btn btn-danger" id="btn-confirm-delete">Xóa tài khoản</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="toast-container" id="toast-container" aria-live="polite"></div>
+    <script type="module" src="/app.js"></script>
+  </body>
+</html>

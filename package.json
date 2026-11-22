@@ -1,0 +1,20 @@
+{
+  "name": "google-one-pool",
+  "version": "0.1.0",
+  "description": "Local Google AI Pro account pool manager with isolated Chrome profiles, gentle keep-alive, rotation/cooldown tracking, Web Dashboard, CLI, and native macOS Menu Bar app.",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "gpool": "./bin/gpool.ts"
+  },
+  "scripts": {
+    "test": "node --test test/*.test.ts",
+    "gpool": "node bin/gpool.ts",
+    "tui": "node bin/gpool.ts tui",
+    "daemon": "node bin/gpool.ts daemon run",
+    "build:menubar": "bash macos/build-menubar.sh"
+  },
+  "engines": {
+    "node": ">=26.0.0"
+  }
+}
